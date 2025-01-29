@@ -1,0 +1,19 @@
+data_paths:
+  dlr_buses: "data/dlr-buses.csv"
+  dlr_lines: "data/dlr-lines.csv"
+  network_buses: "data/network-buses.csv"
+  network_lines: "data/network-lines.csv"
+
+output_paths:
+  unmatched_network_lines: "results/csv/unmatched_network_lines.csv"
+  unmatched_dlr_lines: "results/csv/unmatched_dlr_lines.csv"
+  matched_lines_with_buses: "results/csv/matched_lines_with_buses.csv"
+  matched_network_lines_with_allocated_attributes: "results/csv/matched_network_lines_with_allocated_attributes.csv"
+
+map_paths:
+  unmatched_lines_map: "results/maps/unmatched_lines_map.html"
+  full_map: "results/maps/full_map2.html"
+
+parameters:
+  max_distance: 500
+  buffer_distance: 1000

@@ -1,0 +1,32 @@
+data_dir: 'data'
+results_dir: 'results'
+csv_dir: 'results/csv'
+maps_dir: 'results/maps'
+
+data_files:
+  network_buses_file: 'data/network-buses.csv'
+  dlr_buses_file: 'data/dlr-buses.csv'
+  network_transformers_file: 'data/network-transformers.csv'
+  dlr_transformers_file: 'data/dlr-transformers.csv'
+
+output_files:
+  matched_substations_csv: 'results/csv/matched_substations.csv'
+  unmatched_substations_csv: 'results/csv/unmatched_substations.csv'
+  matched_dlr_substations_csv: 'results/csv/matched_dlr_substations.csv'         # **New Entry**
+  unmatched_dlr_substations_csv: 'results/csv/unmatched_dlr_substations.csv'     # **New Entry**
+  dlr_substations_count_csv: 'results/csv/dlr_substations_count.csv'
+
+map_files:
+  matched_substations_map: 'results/maps/matched_substations_map.html'
+  unmatched_substations_map: 'results/maps/unmatched_substations_map.html'
+  total_map: 'results/maps/total_substations_map.html'
+  test_total_map: 'results/maps/test_total_substations_map.html'
+  filtered_substations_map: 'results/maps/filtered_substations_map.html'
+
+coordinate_reference_systems:
+  crs: 'EPSG:4326'         # Original CRS (e.g., WGS84)
+  projected_crs: 'EPSG:3857' # Projected CRS for accurate spatial operations
+
+parameters:
+  buffer_distance: 500     # Buffer radius in meters
+
