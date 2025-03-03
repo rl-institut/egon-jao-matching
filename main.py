@@ -450,32 +450,30 @@ def main():
         print("Unique b_dlr:", dlr_lines_gdf["b_dlr"].unique())
 
         # Attempt to allocate attributes from DLR to network lines
-        try:
-            network_lines_updated, allocated_matches = (
-                allocate_attributes_to_network_lines(
-                    matches_df_all, network_lines_gdf, dlr_lines_within_germany
-                )
+        # try:
+        network_lines_updated, allocated_matches = allocate_attributes_to_network_lines(
+            matches_df_all, network_lines_gdf, dlr_lines_within_germany
+        )
+
+        # If the code gave us all zeros, just log a warning
+        allocation_count = (network_lines_updated["r_allocated"] > 0).sum()
+        if allocation_count == 0:
+            logger.warning(
+                "Allocation method produced only zero values. "
+                "This could be due to missing or invalid DLR parameters."
             )
 
-            # If the code gave us all zeros, just log a warning
-            allocation_count = (network_lines_updated["r_allocated"] > 0).sum()
-            if allocation_count == 0:
-                logger.warning(
-                    "Allocation method produced only zero values. "
-                    "This could be due to missing or invalid DLR parameters."
-                )
-
-        except Exception as e:
-            logger.error(f"Allocation method failed: {str(e)}")
-            logger.warning("Setting all allocations to zero.")
-            network_lines_updated = network_lines_gdf.copy()
-            # Provide minimal columns so code can continue
-            network_lines_updated["r_allocated"] = 0
-            network_lines_updated["x_allocated"] = 0
-            network_lines_updated["b_allocated"] = 0
-            network_lines_updated["r_total"] = network_lines_updated["r"]
-            network_lines_updated["x_total"] = network_lines_updated["x"]
-            network_lines_updated["b_total"] = network_lines_updated["b"]
+        # except Exception as e:
+        #     logger.error(f"Allocation method failed: {str(e)}")
+        #     logger.warning("Setting all allocations to zero.")
+        #     network_lines_updated = network_lines_gdf.copy()
+        #     # Provide minimal columns so code can continue
+        #     network_lines_updated["r_allocated"] = 0
+        #     network_lines_updated["x_allocated"] = 0
+        #     network_lines_updated["b_allocated"] = 0
+        #     network_lines_updated["r_total"] = network_lines_updated["r"]
+        #     network_lines_updated["x_total"] = network_lines_updated["x"]
+        #     network_lines_updated["b_total"] = network_lines_updated["b"]
 
         # Verify allocated columns exist
         for col in [

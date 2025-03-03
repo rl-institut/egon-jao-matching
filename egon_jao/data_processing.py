@@ -1627,12 +1627,20 @@ def allocate_attributes_to_network_lines(
     # Apply Allocation Functions
 
     # One-to-One Matches
-    one_to_one_matches = matches_with_dlr[
+    one_to_one_matches = matches_with_dlr.loc[
         matches_with_dlr["match_type"] == "one_to_one"
-    ].copy()
-    logger.debug(f"Processing one-to-one matches: {len(one_to_one_matches)} records")
-    one_to_one_matches = one_to_one_matches.apply(allocate_one_to_one, axis=1)
-    allocated_matches_list.append(one_to_one_matches[required_columns])
+    ]
+
+    if one_to_one_matches.empty:
+        logger.warning("No one-to-one matches found. Check if this is plausible.")
+    else:
+        logger.debug(
+            f"Processing one-to-one matches: {len(one_to_one_matches)} records"
+        )
+
+        one_to_one_matches = one_to_one_matches.apply(allocate_one_to_one, axis=1)
+
+        allocated_matches_list.append(one_to_one_matches[required_columns])
 
     # One-to-Many Matches
     one_to_many_matches = matches_with_dlr[
@@ -1728,12 +1736,12 @@ def allocate_attributes_to_network_lines(
         allocated_matches_agg, left_on="id", right_on="id_net", how="left"
     )
 
-    print("\nDEBUG: Final network_lines_updated:")
-    print(
-        network_lines_updated[
-            ["id", "r_net", "r_allocated", "x_allocated", "b_allocated", "length_m_dlr"]
-        ].head(30)
-    )
+    # print("\nDEBUG: Final network_lines_updated:")
+    # print(
+    #     network_lines_updated[
+    #         ["id", "r_net", "r_allocated", "x_allocated", "b_allocated", "length_m_dlr"]
+    #     ].head(30)
+    # )
 
     # If you don't have 'r_net', then see if 'r' is present
 
