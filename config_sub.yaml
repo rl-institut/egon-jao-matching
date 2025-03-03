@@ -29,4 +29,3 @@ coordinate_reference_systems:
 
 parameters:
   buffer_distance: 500     # Buffer radius in meters
-

@@ -1,5 +1,6 @@
-import pandas as pd
 import folium
+import pandas as pd
+
 
 def save_csv(df, path):
     """
@@ -14,6 +15,7 @@ def save_csv(df, path):
         print(f"Saved CSV to {path}")
     except Exception as e:
         print(f"Failed to save CSV to {path}: {e}")
+
 
 def save_folium_map(folium_map, path):
     """
