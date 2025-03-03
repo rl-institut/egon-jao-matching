@@ -24,9 +24,7 @@ from egon_jao.data_processing import (
     create_folium_map,
     validate_geodataframes,
     validate_parameter_ranges,
-    check_dlr_parameters,
-    force_allocation,
-    generate_synthetic_allocations
+    check_dlr_parameters,  # We still need to check if parameters exist
 )
 
 
@@ -41,7 +39,6 @@ logging.basicConfig(
     ]
 )
 
-# Create a logger instance
 logger = logging.getLogger(__name__)
 
 def setup_logging():
@@ -91,9 +88,7 @@ def main():
         # Ensure output directories exist
         ensure_directories(config)
 
-        # -------------------------------
         # 1) Load raw CSV Data
-        # -------------------------------
         try:
             dlr_buses, dlr_lines, network_buses, network_lines = load_data(config)
             logger.debug("Loaded raw CSV data for dlr_buses, dlr_lines, network_buses, network_lines.")
@@ -117,90 +112,77 @@ def main():
             logger.error(f"Error loading data: {str(e)}", exc_info=True)
             raise
 
-        # -------------------------------
         # 2) Prepare DLR GeoDataFrames
-        # -------------------------------
         dlr_buses_gdf, dlr_lines_gdf = prepare_dlr_geodataframes(dlr_buses, dlr_lines)
-        logger.debug(f"After prepare_dlr_geodataframes:\n"
-                     f" dlr_buses_gdf columns: {dlr_buses_gdf.columns.tolist()}, size={len(dlr_buses_gdf)}\n"
-                     f" dlr_lines_gdf columns: {dlr_lines_gdf.columns.tolist()}, size={len(dlr_lines_gdf)}")
+        logger.debug(
+            "After prepare_dlr_geodataframes:\n"
+            f" dlr_buses_gdf columns: {dlr_buses_gdf.columns.tolist()}, size={len(dlr_buses_gdf)}\n"
+            f" dlr_lines_gdf columns: {dlr_lines_gdf.columns.tolist()}, size={len(dlr_lines_gdf)}"
+        )
 
-        # -------------------------------
         # 2.5) Check DLR electrical parameters
-        # -------------------------------
         dlr_params_ok = check_dlr_parameters(dlr_lines_gdf)
         if not dlr_params_ok:
-            logger.warning("DLR lines are missing electrical parameters or have all zero values.")
-            logger.warning("Will proceed but allocation will likely fail or produce zeros.")
+            logger.warning("DLR lines are missing electrical parameters or have all zero values. "
+                           "Allocation may produce zeros.")
 
-        # -------------------------------
         # 3) Prepare Network lines GDF
-        # -------------------------------
         network_lines_gdf = prepare_network_lines_geodataframe(network_lines)
-        logger.debug(f"After prepare_network_lines_geodataframe:\n"
-                     f" network_lines_gdf columns: {network_lines_gdf.columns.tolist()}, size={len(network_lines_gdf)}")
+        logger.debug(
+            "After prepare_network_lines_geodataframe:\n"
+            f" network_lines_gdf columns: {network_lines_gdf.columns.tolist()}, size={len(network_lines_gdf)}"
+        )
 
-        # -------------------------------
         # 4) Project both to 'EPSG:32632'
-        # -------------------------------
         network_lines_gdf = network_lines_gdf.to_crs('EPSG:32632')
         dlr_lines_gdf = dlr_lines_gdf.to_crs('EPSG:32632')
         logger.debug(f"Network lines CRS: {network_lines_gdf.crs}")
         logger.debug(f"DLR lines CRS: {dlr_lines_gdf.crs}")
 
-        # Add these print statements for a quick sanity check of the bounding boxes:
+        # Check bounding boxes for sanity
         print("Network lines bounding box:", network_lines_gdf.total_bounds)
         print("DLR lines bounding box:", dlr_lines_gdf.total_bounds)
 
-        # You can also log them:
         net_bounds = network_lines_gdf.total_bounds
         dlr_bounds = dlr_lines_gdf.total_bounds
         logger.debug(f"Network lines bounding box: {net_bounds}")
         logger.debug(f"DLR lines bounding box: {dlr_bounds}")
 
-        # -------------------------------
         # 5) Extract Buses from Network lines
-        # -------------------------------
         network_buses_gdf = extract_buses_from_lines(network_lines_gdf)
         logger.debug(f"After extract_buses_from_lines:\n {network_buses_gdf.head(10)}")
 
-        # Validate geodataframes (using the consolidated validation function)
+        # Validate geodataframes
         validate_geodataframes(network_buses_gdf, dlr_buses_gdf, dlr_lines_gdf)
 
-        # -------------------------------
         # 6) Load Germany boundary
-        # -------------------------------
         germany_gdf = load_germany_boundary()
 
-        # -------------------------------
         # 7) Filter DLR lines to within Germany
-        # -------------------------------
         dlr_lines_within_germany = filter_dlr_lines_inside_germany(dlr_lines_gdf, germany_gdf)
         logger.debug(f"DLR lines within Germany: {len(dlr_lines_within_germany)}")
 
-        # -------------------------------
         # 8) Match buses (Nearest)
-        # -------------------------------
         bus_id_mapping = match_buses_with_nearest_multiple(network_buses_gdf, dlr_buses_gdf, config)
         logger.debug(f"Bus ID mapping sample:\n{bus_id_mapping.head(10)}")
 
-        # -------------------------------
         # 9) Update network lines w/ matched DLR buses
-        # -------------------------------
         network_lines_matched = update_network_lines_with_matched_buses(network_lines_gdf, bus_id_mapping)
-        logger.debug(f"Network lines matched (sample):\n"
-                     f"{network_lines_matched[['id', 'bus0', 'bus1', 'dlr_bus0', 'dlr_bus1']].head(10)}")
-
-        # -------------------------------
-        # 10) Nearest Bus Lines => match_lines_based_on_matched_buses
-        # -------------------------------
-        matched_network_lines_bus, matched_dlr_lines_bus, matches_df_bus, matches = match_lines_based_on_matched_buses(
-            network_lines_matched, dlr_lines_within_germany
+        logger.debug(
+            "Network lines matched (sample):\n"
+            f"{network_lines_matched[['id', 'bus0', 'bus1', 'dlr_bus0', 'dlr_bus1']].head(10)}"
         )
-        logger.debug(f"matches_df_bus shape={matches_df_bus.shape}, columns={matches_df_bus.columns.tolist()}")
+
+        # 10) Match lines based on matched buses
+        matched_network_lines_bus, matched_dlr_lines_bus, matches_df_bus, matches = \
+            match_lines_based_on_matched_buses(network_lines_matched, dlr_lines_within_germany)
+        logger.debug(
+            f"matches_df_bus shape={matches_df_bus.shape}, "
+            f"columns={matches_df_bus.columns.tolist()}"
+        )
         logger.debug(f"matches_df_bus head:\n{matches_df_bus.head(10)}")
 
-        # Ensure 'bus_pair' is assigned only once, etc.
+        # Ensure 'bus_pair'
         matches_df_bus['bus_pair'] = matches_df_bus.apply(
             lambda row: tuple(sorted([row['bus0_dlr'], row['bus1_dlr']])), axis=1
         )
@@ -224,7 +206,7 @@ def main():
         matches_df_bus = matches_df_bus.drop(columns=['bus_pair'])
 
         if 'id_dlr_dlr' in matches_df_bus.columns:
-            logger.warning("Duplicate 'id_dlr_dlr' columns found. Dropping.")
+            logger.warning("Duplicate 'id_dlr_dlr' column found. Dropping.")
             matches_df_bus = matches_df_bus.drop(columns=['id_dlr_dlr'])
 
         missing_id_dlr = matches_df_bus['id_dlr'].isnull().sum()
@@ -242,7 +224,7 @@ def main():
             logger.debug(f"Columns: {matches_df_bus.columns.tolist()}")
             raise KeyError("Missing 'id_net' or 'id_dlr' columns.")
 
-        # Log nearest bus method counts
+        # Summaries
         unique_bus_matches_net = matches_df_bus['id_net'].nunique()
         unique_bus_matches_dlr = matches_df_bus['id_dlr'].nunique()
         logger.info(f"\nNumber of network lines matched (nearest bus method): {unique_bus_matches_net}")
@@ -251,18 +233,17 @@ def main():
         matched_network_line_ids = set(matches_df_bus['id_net'])
         matched_dlr_line_ids = set(matches_df_bus['id_dlr'])
 
-        # Update unmatched
+        # Unmatched after nearest-bus matching
         unmatched_network_lines = network_lines_gdf[~network_lines_gdf['id'].isin(matched_network_line_ids)].copy()
-        unmatched_dlr_lines = dlr_lines_within_germany[
-            ~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
+        unmatched_dlr_lines = dlr_lines_within_germany[~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
 
-        # -------------------------------
         # 11) Buffer method
-        # -------------------------------
-        additional_matched_net_buf, additional_matched_dlr_buf, matches_df_buffer = match_lines_with_buffer(
-            unmatched_network_lines, unmatched_dlr_lines, config
+        additional_matched_net_buf, additional_matched_dlr_buf, matches_df_buffer = \
+            match_lines_with_buffer(unmatched_network_lines, unmatched_dlr_lines, config)
+        logger.debug(
+            f"matches_df_buffer shape={matches_df_buffer.shape}, "
+            f"columns={matches_df_buffer.columns.tolist()}"
         )
-        logger.debug(f"matches_df_buffer shape={matches_df_buffer.shape}, columns={matches_df_buffer.columns.tolist()}")
         logger.debug(f"matches_df_buffer sample:\n{matches_df_buffer.head(10)}")
 
         unique_buffer_matches_net = matches_df_buffer['id_net'].nunique()
@@ -274,19 +255,18 @@ def main():
         matched_dlr_line_ids.update(matches_df_buffer['id_dlr'])
 
         unmatched_network_lines = network_lines_gdf[~network_lines_gdf['id'].isin(matched_network_line_ids)].copy()
-        unmatched_dlr_lines = dlr_lines_within_germany[
-            ~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
+        unmatched_dlr_lines = dlr_lines_within_germany[~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
 
-        # -------------------------------
         # 12) Merge connected unmatched lines -> match_merged_lines_to_dlr
-        # -------------------------------
         merged_unmatched_network_lines = merge_connected_unmatched_network_lines(unmatched_network_lines)
         logger.debug(f"Merged unmatched lines => {len(merged_unmatched_network_lines)} rows")
 
-        additional_net_merge, additional_dlr_merge, matches_df_merge = match_merged_lines_to_dlr(
-            merged_unmatched_network_lines, unmatched_dlr_lines, config
+        additional_net_merge, additional_dlr_merge, matches_df_merge = \
+            match_merged_lines_to_dlr(merged_unmatched_network_lines, unmatched_dlr_lines, config)
+        logger.debug(
+            f"matches_df_merge shape={matches_df_merge.shape}, "
+            f"columns={matches_df_merge.columns.tolist()}"
         )
-        logger.debug(f"matches_df_merge shape={matches_df_merge.shape}, columns={matches_df_merge.columns.tolist()}")
         logger.debug(f"matches_df_merge sample:\n{matches_df_merge.head(10)}")
 
         unique_merge_matches_net = matches_df_merge['id_net'].nunique()
@@ -297,11 +277,13 @@ def main():
         matched_network_line_ids.update(matches_df_merge['id_net'])
         matched_dlr_line_ids.update(matches_df_merge['id_dlr'])
 
-        # -------------------------------
         # 13) Combine all matches
-        # -------------------------------
         matches_df_all = pd.concat([matches_df_bus, matches_df_buffer, matches_df_merge], ignore_index=True)
         logger.debug(f"matches_df_all shape before drop_duplicates => {matches_df_all.shape}")
+
+        print("\nDEBUG: Final matches_df_all info:")
+        print(f"  shape={matches_df_all.shape}")
+        print(matches_df_all.head(15))
 
         matches_df_all = matches_df_all.drop_duplicates(subset=['id_net', 'id_dlr'])
         logger.debug(f"matches_df_all shape after drop_duplicates => {matches_df_all.shape}")
@@ -316,12 +298,9 @@ def main():
             matched_dlr_line_ids = set(matches_df_bus['id_dlr'])
 
         unmatched_network_lines = network_lines_gdf[~network_lines_gdf['id'].isin(matched_network_line_ids)].copy()
-        unmatched_dlr_lines = dlr_lines_within_germany[
-            ~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
+        unmatched_dlr_lines = dlr_lines_within_germany[~dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
 
-        # -------------------------------
         # 14) Print final match counts
-        # -------------------------------
         total_network_lines = len(network_lines_gdf)
         total_dlr_lines = len(dlr_lines_within_germany)
         logger.info(f"\nTotal number of network lines: {total_network_lines}")
@@ -351,77 +330,41 @@ def main():
         matched_network_lines = network_lines_gdf[network_lines_gdf['id'].isin(matched_network_line_ids)].copy()
         matched_dlr_lines = dlr_lines_within_germany[dlr_lines_within_germany['id'].isin(matched_dlr_line_ids)].copy()
 
-        # -------------------------------
         # 15) Attribute allocation with streamlined approach
-        # -------------------------------
+        # Check if DLR data has parameters
+        has_parameters = check_dlr_parameters(dlr_lines_within_germany)
+
+        if not has_parameters:
+            logger.warning("DLR data is missing or zero for electrical parameters. "
+                           "We will proceed but the allocations may be zeros.")
+
+        print("Columns in final dlr_lines_gdf before allocation:")
+        print(dlr_lines_gdf.columns)
+        print(dlr_lines_gdf.head(5))
+        print("dlr_lines_gdf columns:", dlr_lines_gdf.columns)
+        print("Sample of dlr_lines_gdf:\n", dlr_lines_gdf[['id', 'r_dlr', 'x_dlr', 'b_dlr', 'length_m']].head(15))
+
+        print("\nUnique r_dlr:", dlr_lines_gdf['r_dlr'].unique())
+        print("Unique x_dlr:", dlr_lines_gdf['x_dlr'].unique())
+        print("Unique b_dlr:", dlr_lines_gdf['b_dlr'].unique())
+
+        # Attempt to allocate attributes from DLR to network lines
         try:
-            # First, check if DLR data has parameters
-            has_parameters = check_dlr_parameters(dlr_lines_within_germany)
+            network_lines_updated, allocated_matches = allocate_attributes_to_network_lines(
+                matches_df_all, network_lines_gdf, dlr_lines_within_germany
+            )
 
-            if not has_parameters:
-                logger.warning("DLR data is missing electrical parameters. Will use synthetic allocation.")
-                # Use synthetic allocation if parameters are missing
-                network_lines_updated = generate_synthetic_allocations(
-                    network_lines_gdf, matches_df_all, dlr_lines_within_germany
-                )
-            else:
-                # Try forced allocation first (our primary method)
-                network_lines_updated = force_allocation(
-                    matches_df_all, network_lines_gdf, dlr_lines_within_germany
-                )
-
-                # Verify we have non-zero values
-                allocation_count = (network_lines_updated['r_allocated'] > 0).sum()
-                if allocation_count == 0:
-                    logger.warning("Forced allocation produced only zero values.")
-
-                    # Try allocate_attributes_to_network_lines as the secondary method
-                    try:
-                        network_lines_updated, allocated_matches = allocate_attributes_to_network_lines(
-                            matches_df_all, network_lines_gdf, dlr_lines_within_germany
-                        )
-
-                        # Check if this method produced non-zero values
-                        allocation_count = (network_lines_updated['r_allocated'] > 0).sum()
-                        if allocation_count == 0:
-                            logger.warning("All allocation methods produced zeros. Using synthetic allocation...")
-                            network_lines_updated = generate_synthetic_allocations(
-                                network_lines_gdf, matches_df_all, dlr_lines_within_germany
-                            )
-                    except Exception as e:
-                        logger.error(f"Secondary allocation method failed: {str(e)}")
-                        logger.warning("Using synthetic allocation as fallback...")
-                        network_lines_updated = generate_synthetic_allocations(
-                            network_lines_gdf, matches_df_all, dlr_lines_within_germany
-                        )
-                else:
-                    logger.info(f"Successful forced allocation to {allocation_count} network lines")
+            # If the code gave us all zeros, just log a warning
+            allocation_count = (network_lines_updated['r_allocated'] > 0).sum()
+            if allocation_count == 0:
+                logger.warning("Allocation method produced only zero values. "
+                               "This could be due to missing or invalid DLR parameters.")
 
         except Exception as e:
-            logger.error(f"All allocation methods failed: {str(e)}", exc_info=True)
-
-            # If everything fails, try the simplest synthetic approach
-            try:
-                logger.warning("Using synthetic allocation as last resort...")
-                network_lines_updated = generate_synthetic_allocations(
-                    network_lines_gdf, matches_df_all, dlr_lines_within_germany
-                )
-            except Exception as e2:
-                logger.error(f"Even synthetic allocation failed: {str(e2)}")
-
-                # Absolute last resort: just add zero columns
-                network_lines_updated = network_lines_gdf.copy()
-                network_lines_updated['r_allocated'] = 0
-                network_lines_updated['x_allocated'] = 0
-                network_lines_updated['b_allocated'] = 0
-                network_lines_updated['r_total'] = network_lines_updated['r']
-                network_lines_updated['x_total'] = network_lines_updated['x']
-                network_lines_updated['b_total'] = network_lines_updated['b']
-
-        # Verify allocated columns exist before saving
-        if 'r_allocated' not in network_lines_updated.columns:
-            logger.warning("Adding missing allocation columns before saving")
-            # Add them with zeros if they don't exist
+            logger.error(f"Allocation method failed: {str(e)}")
+            logger.warning("Setting all allocations to zero.")
+            network_lines_updated = network_lines_gdf.copy()
+            # Provide minimal columns so code can continue
             network_lines_updated['r_allocated'] = 0
             network_lines_updated['x_allocated'] = 0
             network_lines_updated['b_allocated'] = 0
@@ -429,70 +372,70 @@ def main():
             network_lines_updated['x_total'] = network_lines_updated['x']
             network_lines_updated['b_total'] = network_lines_updated['b']
 
+        # Verify allocated columns exist
+        for col in ['r_allocated', 'x_allocated', 'b_allocated',
+                    'r_total', 'x_total', 'b_total']:
+            if col not in network_lines_updated.columns:
+                logger.warning(f"Adding missing column '{col}' with zeros.")
+                network_lines_updated[col] = 0
+
         # Validate parameter ranges
         is_valid = validate_parameter_ranges(network_lines_updated)
         if not is_valid:
             logger.warning("Some allocated parameters are outside typical ranges.")
 
-        # -------------------------------
-        # 16) Explicitly save allocation results
-        # -------------------------------
+        # 16) Save allocation results
         try:
-            # Define explicit output paths
             matched_network_lines_path = 'results/csv/matched_network_lines_with_allocated_attributes.csv'
             allocation_summary_path = 'results/csv/allocation_summary.csv'
 
-            # Ensure directories exist
             os.makedirs(os.path.dirname(matched_network_lines_path), exist_ok=True)
 
-            # Save the full network lines dataframe with allocations
             network_lines_updated.to_csv(matched_network_lines_path, index=False)
             logger.info(f"Matched network lines with allocated attributes saved to '{matched_network_lines_path}'")
 
-            # Save just the allocation columns for easier review
-            allocation_cols = ['id', 'r', 'x', 'b', 'r_allocated', 'x_allocated', 'b_allocated',
-                               'r_total', 'x_total', 'b_total']
+            # Save just the allocation columns
+            allocation_cols = [
+                'id', 'r', 'x', 'b',
+                'r_allocated', 'x_allocated', 'b_allocated',
+                'r_total', 'x_total', 'b_total'
+            ]
             allocation_summary = network_lines_updated[allocation_cols]
             allocation_summary.to_csv(allocation_summary_path, index=False)
             logger.info(f"Allocation summary saved to '{allocation_summary_path}'")
 
-            # Print allocation statistics to console
             non_zero_allocations = (network_lines_updated['r_allocated'] > 0).sum()
             print(f"\nNon-zero allocations: {non_zero_allocations} of {len(network_lines_updated)} lines")
 
-            # Print a sample of the allocation values
             print("\nSample of allocation values (first 10 rows with non-zero allocations):")
-            sample_allocations = network_lines_updated[network_lines_updated['r_allocated'] > 0][allocation_cols].head(
-                10)
+            sample_allocations = network_lines_updated[
+                network_lines_updated['r_allocated'] > 0
+            ][allocation_cols].head(10)
             print(sample_allocations)
 
         except Exception as e:
             logger.error(f"Error saving allocation results: {str(e)}", exc_info=True)
 
-        # Create final CSV (this creates matches_with_buses.csv)
+        # Create the matches CSV
         create_matches_csv(matches_df_all, network_lines_updated, dlr_lines_gdf, config)
 
-        # Save matched lines with allocated attributes (this is for config-based path)
+        # Optionally save matched lines with config path
         if 'output_paths' in config and 'matched_network_lines_with_allocated_attributes' in config['output_paths']:
-            # Check that allocated attribute columns exist
             allocated_cols = ['r_allocated', 'x_allocated', 'b_allocated', 'r_total', 'x_total', 'b_total']
-            missing_cols = [col for col in allocated_cols if col not in network_lines_updated.columns]
-
+            missing_cols = [c for c in allocated_cols if c not in network_lines_updated.columns]
             if missing_cols:
                 logger.warning(f"Missing allocated attribute columns: {missing_cols}")
                 logger.debug(f"Available columns: {network_lines_updated.columns.tolist()}")
 
-            # Log the shape and first few rows for debugging
             logger.debug(f"network_lines_updated shape: {network_lines_updated.shape}")
-            logger.debug(f"First few rows of allocation columns:")
 
             for col in allocated_cols:
                 if col in network_lines_updated.columns:
-                    logger.debug(f"{col} statistics: min={network_lines_updated[col].min()}, "
-                                 f"max={network_lines_updated[col].max()}, "
-                                 f"mean={network_lines_updated[col].mean()}")
+                    stats_min = network_lines_updated[col].min()
+                    stats_max = network_lines_updated[col].max()
+                    stats_mean = network_lines_updated[col].mean()
+                    logger.debug(f"{col}: min={stats_min}, max={stats_max}, mean={stats_mean}")
 
-            # Save to config-specified path
             config_path = config['output_paths']['matched_network_lines_with_allocated_attributes']
             network_lines_updated.to_csv(config_path, index=False)
             logger.info(f"Also saved to config path: {config_path}")
@@ -506,7 +449,8 @@ def main():
 
         unmatched_network_bus_ids = set(unmatched_network_lines['bus0']).union(set(unmatched_network_lines['bus1']))
         unmatched_network_buses_gdf = network_buses_gdf[
-            network_buses_gdf['bus_idx'].isin(unmatched_network_bus_ids)].copy()
+            network_buses_gdf['bus_idx'].isin(unmatched_network_bus_ids)
+        ].copy()
 
         matched_dlr_bus_ids = set(matched_dlr_lines['bus0']).union(set(matched_dlr_lines['bus1']))
         matched_dlr_buses_gdf = dlr_buses_gdf[dlr_buses_gdf['name'].isin(matched_dlr_bus_ids)].copy()
@@ -519,15 +463,19 @@ def main():
             matched_network_buses_gdf.rename(columns={'bus_idx': 'bus_id'}),
             matched_dlr_buses_gdf.rename(columns={'name': 'bus_id'})
         ], ignore_index=True)
-        matched_buses_gdf['type'] = (['Network'] * len(matched_network_buses_gdf)
-                                     + ['DLR'] * len(matched_dlr_buses_gdf))
+        matched_buses_gdf['type'] = (
+            ['Network'] * len(matched_network_buses_gdf)
+            + ['DLR'] * len(matched_dlr_buses_gdf)
+        )
 
         unmatched_buses_gdf = pd.concat([
             unmatched_network_buses_gdf.rename(columns={'bus_idx': 'bus_id'}),
             unmatched_dlr_buses_gdf.rename(columns={'name': 'bus_id'})
         ], ignore_index=True)
-        unmatched_buses_gdf['type'] = (['Network'] * len(unmatched_network_buses_gdf)
-                                       + ['DLR'] * len(unmatched_dlr_buses_gdf))
+        unmatched_buses_gdf['type'] = (
+            ['Network'] * len(unmatched_network_buses_gdf)
+            + ['DLR'] * len(unmatched_dlr_buses_gdf)
+        )
 
         if 'type' in matched_buses_gdf.columns:
             logger.info("'type' column exists in matched_buses_gdf.")
@@ -539,7 +487,7 @@ def main():
         else:
             logger.error("'type' column is missing in unmatched_buses_gdf.")
 
-        # Final Folium Map
+        # Final Folium map with matched/unmatched lines and buses
         logger.info("\nGenerating map with matched and unmatched buses...")
         create_folium_map(
             germany_gdf,
@@ -561,9 +509,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-
-
-
-
