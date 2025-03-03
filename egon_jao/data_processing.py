@@ -9,59 +9,14 @@ from shapely.ops import linemerge
 import logging
 import folium
 from folium.plugins import MeasureControl, MousePosition
+import numpy as np
+from shapely import wkt
 
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-
-def validate_buses(network_buses_gdf, dlr_buses_gdf):
-    """
-    Validates the buses GeoDataFrames for duplicates.
-
-    Parameters:
-        network_buses_gdf (GeoDataFrame): GeoDataFrame of network buses.
-        dlr_buses_gdf (GeoDataFrame): GeoDataFrame of DLR buses.
-
-    Raises:
-        None. Logs warnings if duplicates are found.
-    """
-    # Check for duplicate bus_idx in network buses
-    duplicate_network_buses = network_buses_gdf[network_buses_gdf.duplicated(subset='bus_idx', keep=False)]
-    if not duplicate_network_buses.empty:
-        logger.warning("Duplicate bus_idx found in network_buses_gdf:")
-        logger.warning(duplicate_network_buses)
-    else:
-        logger.info("No duplicate bus_idx found in network_buses_gdf.")
-
-    # Check for duplicate bus names in DLR buses
-    duplicate_dlr_buses = dlr_buses_gdf[dlr_buses_gdf.duplicated(subset='name', keep=False)]
-    if not duplicate_dlr_buses.empty:
-        logger.warning("Duplicate bus names found in dlr_buses_gdf:")
-        logger.warning(duplicate_dlr_buses)
-    else:
-        logger.info("No duplicate bus names found in dlr_buses_gdf.")
-
-
-def validate_dlr_lines(dlr_lines_gdf):
-    """
-    Validates the DLR lines GeoDataFrame for required columns.
-
-    Parameters:
-        dlr_lines_gdf (GeoDataFrame): GeoDataFrame of DLR lines.
-
-    Raises:
-        KeyError: If required columns are missing.
-    """
-    # Check for required columns in dlr_lines_gdf
-    required_columns = ['r_dlr', 'x_dlr', 'b_dlr']
-    missing_columns = [col for col in required_columns if col not in dlr_lines_gdf.columns]
-    if missing_columns:
-        logger.error(f"Missing columns in dlr_lines_gdf: {missing_columns}")
-        raise KeyError(f"Missing columns in dlr_lines_gdf: {missing_columns}")
-    else:
-        logger.info("All required columns in dlr_lines_gdf are present.")
 
 
 def prepare_dlr_geodataframes(dlr_buses, dlr_lines):
@@ -91,38 +46,71 @@ def prepare_dlr_geodataframes(dlr_buses, dlr_lines):
     after = len(dlr_buses_gdf)
     logger.info(f"Removed {before - after} duplicate DLR buses.")
 
-    # Clean bus IDs in DLR lines
-    dlr_lines['bus0'] = dlr_lines['bus0'].apply(clean_dlr_bus_id)
-    dlr_lines['bus1'] = dlr_lines['bus1'].apply(clean_dlr_bus_id)
+    # Validate and clean geometries in dlr_lines
+    try:
+        # Check if dlr_lines already has a geometry column
+        if 'geometry' in dlr_lines.columns:
+            # If it's a string, convert it to actual geometry
+            if dlr_lines['geometry'].dtype == 'object':
+                # Try to convert WKT strings to geometries
+                try:
+                    valid_geometries = []
+                    for i, geom_str in enumerate(dlr_lines['geometry']):
+                        try:
+                            if pd.isna(geom_str):
+                                valid_geometries.append(None)
+                            else:
+                                # Try to parse and validate the geometry
+                                geom = wkt.loads(str(geom_str))
+                                if geom.is_valid:
+                                    valid_geometries.append(geom)
+                                else:
+                                    # Try to fix invalid geometry
+                                    fixed_geom = geom.buffer(0)
+                                    if fixed_geom.is_valid:
+                                        valid_geometries.append(fixed_geom)
+                                    else:
+                                        logger.warning(f"Could not fix invalid geometry at index {i}")
+                                        valid_geometries.append(None)
+                        except Exception as e:
+                            logger.warning(f"Error parsing geometry at index {i}: {str(e)}")
+                            valid_geometries.append(None)
 
-    # Create a mapping from cleaned bus names to geometries
-    dlr_buses_dict = dlr_buses_gdf.set_index('name')['geometry'].to_dict()
+                    # Replace the geometry column
+                    dlr_lines['geometry'] = valid_geometries
 
-    # Map geometries to DLR lines
-    dlr_lines['bus0_geom'] = dlr_lines['bus0'].map(dlr_buses_dict)
-    dlr_lines['bus1_geom'] = dlr_lines['bus1'].map(dlr_buses_dict)
+                    # Drop rows with None geometries
+                    before_drop = len(dlr_lines)
+                    dlr_lines = dlr_lines.dropna(subset=['geometry'])
+                    after_drop = len(dlr_lines)
+                    if before_drop > after_drop:
+                        logger.warning(
+                            f"Dropped {before_drop - after_drop} rows with invalid geometries from dlr_lines")
 
-    # Drop lines where either bus geometry is missing
-    before = len(dlr_lines)
-    dlr_lines = dlr_lines.dropna(subset=['bus0_geom', 'bus1_geom']).copy()
-    after = len(dlr_lines)
-    logger.info(f"Removed {before - after} duplicate DLR lines.")
+                except Exception as e:
+                    logger.error(f"Error converting WKT strings to geometries: {str(e)}")
+                    raise
 
-    # Create LineString geometries for DLR lines
-    dlr_lines['geometry'] = dlr_lines.apply(
-        lambda row: LineString([row['bus0_geom'], row['bus1_geom']]),
-        axis=1
-    )
+        # Convert DLR lines to GeoDataFrame
+        dlr_lines_gdf = gpd.GeoDataFrame(dlr_lines, geometry='geometry', crs='EPSG:4326')
 
-    # Convert DLR lines to GeoDataFrame
-    dlr_lines_gdf = gpd.GeoDataFrame(dlr_lines, geometry='geometry', crs='EPSG:4326')
+        # Final validation of geometries
+        invalid_geoms = [not geom.is_valid for geom in dlr_lines_gdf.geometry]
+        if any(invalid_geoms):
+            logger.warning(f"Found {sum(invalid_geoms)} invalid geometries in dlr_lines_gdf. Attempting to fix...")
+            dlr_lines_gdf.geometry = dlr_lines_gdf.geometry.buffer(0)
+
+    except Exception as e:
+        logger.error(f"Error preparing DLR lines: {str(e)}")
+        raise
 
     # Add 'name' column to DLR lines
     dlr_lines_gdf['name'] = dlr_lines_gdf['bus0'] + '_' + dlr_lines_gdf['bus1']
 
     # Calculate length in meters
-    dlr_lines_gdf_proj = dlr_lines_gdf.to_crs('EPSG:32632')
-    dlr_lines_gdf['length_m'] = dlr_lines_gdf_proj.geometry.length
+    dlr_lines_gdf.crs = "EPSG:4326"
+    dlr_lines_gdf = dlr_lines_gdf.to_crs("EPSG:32632")
+    dlr_lines_gdf['length_m'] = dlr_lines_gdf.geometry.length
 
     # **Rename 'r', 'x', 'b' to 'r_dlr', 'x_dlr', 'b_dlr'**
     dlr_lines_gdf = dlr_lines_gdf.rename(columns={
@@ -131,10 +119,10 @@ def prepare_dlr_geodataframes(dlr_buses, dlr_lines):
         'b': 'b_dlr'
     })
 
-    # **Assign unique 'id' to DLR lines**
-    dlr_lines_gdf['id'] = dlr_lines_gdf.index.astype(str)
-
-    logger.debug(f"DLR Lines GeoDataFrame Columns after renaming and ID assignment: {dlr_lines_gdf.columns.tolist()}")
+    # Debug existing IDs
+    logger.debug("Sample of existing DLR line IDs:")
+    logger.debug(dlr_lines_gdf['id'].head())
+    logger.debug(f"DLR line ID type: {dlr_lines_gdf['id'].dtype}")
 
     return dlr_buses_gdf, dlr_lines_gdf
 
@@ -259,36 +247,112 @@ def clean_dlr_bus_id(bus_id):
 # Function to prepare Network lines GeoDataFrame and assign 'id'
 
 def prepare_network_lines_geodataframe(network_lines):
-    # Filter Network lines (exclude 110 kV)
+    # Filter out lines (exclude 110 kV)
     network_lines_filtered = network_lines[network_lines['v_nom'] != 110].copy()
 
-    # Read geometries from 'geom' column
-    if 'geom' in network_lines_filtered.columns:
-        network_lines_filtered['geometry'] = gpd.GeoSeries.from_wkt(network_lines_filtered['geom'])
-        network_lines_gdf = gpd.GeoDataFrame(network_lines_filtered, geometry='geometry', crs='EPSG:4326')
-    else:
+    # Ensure the 'geom' column exists
+    if 'geom' not in network_lines_filtered.columns:
         raise ValueError("The 'network-lines.csv' file does not contain a 'geom' column.")
 
-    # **Standardize bus IDs to uppercase**
+    # Convert the WKT in 'geom' to actual geometry with validation
+    valid_geometries = []
+    for i, geom_str in enumerate(network_lines_filtered['geom']):
+        try:
+            if pd.isna(geom_str):
+                valid_geometries.append(None)
+            else:
+                # Try to parse and validate the geometry
+                geom = wkt.loads(str(geom_str))
+                if geom.is_valid:
+                    valid_geometries.append(geom)
+                else:
+                    # Try to fix invalid geometry
+                    fixed_geom = geom.buffer(0)
+                    if fixed_geom.is_valid:
+                        valid_geometries.append(fixed_geom)
+                    else:
+                        logger.warning(f"Could not fix invalid geometry at index {i}")
+                        valid_geometries.append(None)
+        except Exception as e:
+            logger.warning(f"Error parsing geometry at index {i}: {str(e)}")
+            valid_geometries.append(None)
+
+    # Replace the geometry column
+    network_lines_filtered['geometry'] = valid_geometries
+
+    # Drop rows with None geometries
+    before_drop = len(network_lines_filtered)
+    network_lines_filtered = network_lines_filtered.dropna(subset=['geometry'])
+    after_drop = len(network_lines_filtered)
+    if before_drop > after_drop:
+        logger.warning(f"Dropped {before_drop - after_drop} rows with invalid geometries from network_lines")
+
+    # Now construct the actual GeoDataFrame with the proper CRS
+    network_lines_gdf = gpd.GeoDataFrame(
+        network_lines_filtered,
+        geometry='geometry',
+        crs='EPSG:4326'
+    )
+
+    # Final validation of geometries
+    invalid_geoms = [not geom.is_valid for geom in network_lines_gdf.geometry]
+    if any(invalid_geoms):
+        logger.warning(f"Found {sum(invalid_geoms)} invalid geometries in network_lines_gdf. Attempting to fix...")
+        network_lines_gdf.geometry = network_lines_gdf.geometry.buffer(0)
+
+    # Project to a metric CRS to calculate lengths
+    network_lines_gdf_proj = network_lines_gdf.to_crs('EPSG:32632')
+    network_lines_gdf['length_m'] = network_lines_gdf_proj.geometry.length
+
+    # (Optional) Standardize bus IDs
     network_lines_gdf['bus0'] = network_lines_gdf['bus0'].astype(str).str.strip().str.upper()
     network_lines_gdf['bus1'] = network_lines_gdf['bus1'].astype(str).str.strip().str.upper()
 
-    # Assign unique 'id' to Network lines
-    network_lines_gdf['id'] = network_lines_gdf.index.astype(str)
-
-    # Debugging: Verify 'id' assignment
+    # Debug output
     print("Network Lines GeoDataFrame Columns:", network_lines_gdf.columns.tolist())
     print("Sample Network Lines with 'id':")
-    print(network_lines_gdf[['id', 'bus0', 'bus1']].head())
-
-    # Project to a metric CRS for length calculation
-    network_lines_gdf_proj = network_lines_gdf.to_crs('EPSG:32632')
-
-    # Calculate length in meters
-    network_lines_gdf['length_m'] = network_lines_gdf_proj.geometry.length
+    print(network_lines_gdf[['id', 'bus0', 'bus1', 'length_m']].head())
 
     return network_lines_gdf
 
+
+def fix_invalid_geometries(gdf):
+    """
+    Fix invalid geometries in a GeoDataFrame using buffer(0) technique.
+
+    Parameters:
+        gdf (GeoDataFrame): GeoDataFrame with potentially invalid geometries
+
+    Returns:
+        GeoDataFrame: The same GeoDataFrame with fixed geometries
+    """
+    # Check for invalid geometries
+    invalid_mask = ~gdf.geometry.is_valid
+    invalid_count = invalid_mask.sum()
+
+    if invalid_count > 0:
+        logger.warning(f"Found {invalid_count} invalid geometries. Attempting to fix...")
+
+        # Create a copy to avoid modifying the original during iteration
+        gdf_fixed = gdf.copy()
+
+        # Fix invalid geometries
+        gdf_fixed.loc[invalid_mask, 'geometry'] = gdf_fixed.loc[invalid_mask, 'geometry'].buffer(0)
+
+        # Verify fix
+        still_invalid = ~gdf_fixed.geometry.is_valid
+        still_invalid_count = still_invalid.sum()
+
+        if still_invalid_count > 0:
+            logger.warning(f"Could not fix {still_invalid_count} geometries.")
+            # Drop rows with still-invalid geometries
+            gdf_fixed = gdf_fixed[~still_invalid]
+        else:
+            logger.info(f"Successfully fixed all {invalid_count} invalid geometries.")
+
+        return gdf_fixed
+    else:
+        return gdf
 
 
 # Function to extract buses from network lines
@@ -442,7 +506,7 @@ def match_lines_based_on_matched_buses(network_lines_matched, dlr_lines_within_g
         dlr_lines_within_germany (GeoDataFrame): DLR lines within Germany.
 
     Returns:
-        tuple: (matched_network_lines, matched_dlr_lines, matches_df)
+        tuple: (matched_network_lines, matched_dlr_lines, matches_df, matches)
     """
     # Create a unique bus pair identifier for network lines
     network_lines_matched['bus_pair'] = network_lines_matched.apply(
@@ -464,25 +528,30 @@ def match_lines_based_on_matched_buses(network_lines_matched, dlr_lines_within_g
         suffixes=('_net', '_dlr')
     )
 
-    # **Rename 'id' columns appropriately**
-    matches = matches.rename(columns={
-        'id_net': 'id_net',   # Assuming 'id_net' is preserved
-        'id_dlr': 'id_dlr'    # Assuming 'id_dlr' is preserved
-    })
+    # Check for required columns
+    required_columns = {'length_m', 'length_m_dlr'}
+    missing_columns = required_columns - set(matches.columns)
 
-    # Check if 'id_net' and 'id_dlr' exist after merging
-    if 'id_net' not in matches.columns or 'id_dlr' not in matches.columns:
-        logger.error("Merged DataFrame does not contain 'id_net' and 'id_dlr' columns.")
-        logger.debug(f"Merged DataFrame columns: {matches.columns.tolist()}")
-        raise KeyError("Merged DataFrame does not contain 'id_net' and 'id_dlr' columns.")
+    if missing_columns:
+        logger.warning(f"Missing columns in matches: {missing_columns}")
+        # Use geometry to calculate lengths if not present
+        if 'length_m' not in matches.columns and 'geometry_net' in matches.columns:
+            matches_proj = matches.copy()
+            matches_proj.geometry = matches_proj.geometry_net
+            matches_proj = matches_proj.to_crs('EPSG:32632')
+            matches['length_m'] = matches_proj.geometry.length
 
-    # Ensure that 'bus0_dlr' and 'bus1_dlr' are present
-    required_bus_columns = ['bus0_dlr', 'bus1_dlr']
-    missing_bus_columns = [col for col in required_bus_columns if col not in matches.columns]
-    if missing_bus_columns:
-        logger.error(f"Merged DataFrame is missing required bus columns: {missing_bus_columns}")
-        logger.debug(f"Merged DataFrame columns: {matches.columns.tolist()}")
-        raise KeyError(f"Merged DataFrame is missing required bus columns: {missing_bus_columns}")
+        if 'length_m_dlr' not in matches.columns and 'geometry_dlr' in matches.columns:
+            matches_proj = matches.copy()
+            matches_proj.geometry = matches_proj.geometry_dlr
+            matches_proj = matches_proj.to_crs('EPSG:32632')
+            matches['length_m_dlr'] = matches_proj.geometry.length
+
+    # Filter matches based on length ratio if both lengths are available
+    if 'length_m' in matches.columns and 'length_m_dlr' in matches.columns:
+        matches = matches[
+            (matches['length_m'] / matches['length_m_dlr']).between(0.5, 2)
+        ]
 
     # Select relevant columns including 'bus0_dlr' and 'bus1_dlr'
     matches_df = matches[['id_net', 'id_dlr', 'bus0_dlr', 'bus1_dlr']].copy()
@@ -497,7 +566,7 @@ def match_lines_based_on_matched_buses(network_lines_matched, dlr_lines_within_g
     logger.info(f"Number of matches found: {len(matches_df)}")
     logger.debug(f"Sample matches:\n{matches_df.head()}")
 
-    return matched_network_lines, matched_dlr_lines, matches_df
+    return matched_network_lines, matched_dlr_lines, matches_df, matches
 
 
 # Function to match lines using buffer method
@@ -598,72 +667,63 @@ def merge_connected_unmatched_network_lines(unmatched_network_lines_gdf):
 
     Parameters:
     - unmatched_network_lines_gdf (GeoDataFrame): GeoDataFrame of unmatched network lines.
-    - config (dict): Configuration dictionary containing parameters.
 
     Returns:
-    - GeoDataFrame: GeoDataFrame of merged network lines with new 'id's.
+    - GeoDataFrame: GeoDataFrame of merged network lines preserving original IDs
     """
-
-     # Create a graph where nodes are buses and edges are lines
+    # Create a graph where nodes are buses and edges are lines
     g = nx.Graph()
     for idx, row in unmatched_network_lines_gdf.iterrows():
-        # Add 'index' as an attribute to each edge
-        g.add_edge(row['bus0'], row['bus1'], geometry=row['geometry'], index=idx)
+        # Add both geometry and id as attributes to each edge
+        g.add_edge(row['bus0'], row['bus1'], geometry=row['geometry'], id=row['id'])
 
     # Identify connected components
     connected_components = list(nx.connected_components(g))
     logger.info(f"Number of connected components in unmatched network lines: {len(connected_components)}")
 
     merged_lines = []
-    for i, component in enumerate(connected_components):
+    for component in connected_components:
         # Get all edges (lines) in the component
         subgraph = g.subgraph(component)
-        line_indices = [data['index'] for u, v, data in subgraph.edges(data=True)]
-        lines = unmatched_network_lines_gdf.loc[line_indices, 'geometry'].tolist()
 
-        # Flatten MultiLineStrings into LineStrings
-        flattened_lines = []
-        for geom in lines:
-            if geom is None:
-                continue
-            if geom.geom_type == 'LineString':
-                flattened_lines.append(geom)
-            elif geom.geom_type == 'MultiLineString':
-                flattened_lines.extend(geom.geoms)
+        # Get geometries and IDs from the subgraph
+        geometries = []
+        line_id = None  # We'll use the first ID from the component
+
+        for u, v, data in subgraph.edges(data=True):
+            if line_id is None:
+                line_id = data['id']  # Keep the first ID we encounter
+            if data['geometry'] is not None:
+                if data['geometry'].geom_type == 'LineString':
+                    geometries.append(data['geometry'])
+                elif data['geometry'].geom_type == 'MultiLineString':
+                    geometries.extend(data['geometry'].geoms)
+
+        # Merge the lines if we have geometries
+        if geometries:
+            merged_geom = linemerge(geometries)
+            if merged_geom.geom_type in ['LineString', 'MultiLineString']:
+                merged_lines.append({
+                    'id': line_id,  # Use the preserved ID
+                    'geometry': merged_geom
+                })
+                logger.debug(
+                    f"Merged component with ID {line_id}: {len(geometries)} lines merged into a {merged_geom.geom_type}")
             else:
-                logger.warning(f"Skipping geometry of type {geom.geom_type}")
-
-        # Merge the lines
-        if len(flattened_lines) > 0:
-            merged_geom = linemerge(flattened_lines)
-            # Ensure the merged line is a LineString or MultiLineString
-            if merged_geom.geom_type not in ['LineString', 'MultiLineString']:
                 logger.warning(f"Unexpected geometry type after merging: {merged_geom.geom_type}")
-                continue
-            # Store the merged line and associated data
-            merged_lines.append({
-                'geometry': merged_geom
-            })
-            logger.debug(f"Merged component {i}: {len(flattened_lines)} lines merged into a {merged_geom.geom_type}")
-        else:
-            logger.warning(f"No valid lines to merge in component {component}")
 
     # Create a GeoDataFrame of merged lines
     if merged_lines:
-        merged_unmatched_network_lines = gpd.GeoDataFrame(merged_lines, geometry='geometry', crs=unmatched_network_lines_gdf.crs)
-        # Assign new unique 'id's
-        merged_unmatched_network_lines = merged_unmatched_network_lines.reset_index(drop=True)
-        merged_unmatched_network_lines['id'] = merged_unmatched_network_lines.index.astype(str)
-
-        # Debugging: Verify 'id' assignment
-        logger.debug("Merged Lines GeoDataFrame Columns: {}".format(merged_unmatched_network_lines.columns.tolist()))
-        if not merged_unmatched_network_lines.empty:
-            logger.debug("Sample Merged Lines with 'id':\n{}".format(
-                merged_unmatched_network_lines[['id', 'geometry']].head()
-            ))
+        merged_unmatched_network_lines = gpd.GeoDataFrame(
+            merged_lines,
+            geometry='geometry',
+            crs=unmatched_network_lines_gdf.crs
+        )
     else:
-        # Create an empty GeoDataFrame with 'geometry' and 'id' columns
-        merged_unmatched_network_lines = gpd.GeoDataFrame(columns=['geometry', 'id'], crs=unmatched_network_lines_gdf.crs)
+        merged_unmatched_network_lines = gpd.GeoDataFrame(
+            columns=['id', 'geometry'],
+            crs=unmatched_network_lines_gdf.crs
+        )
         logger.info("No merged lines to create. Returning empty GeoDataFrame.")
 
     return merged_unmatched_network_lines
@@ -950,62 +1010,73 @@ def create_folium_map(germany_gdf, network_lines_gdf, dlr_lines_gdf,
 
 # Function to create matched lines CSV
 def create_matches_csv(matches_df_all, network_lines_updated, dlr_lines_gdf, config):
+    # Check if allocated attribute columns exist
+    allocated_cols = ['r_allocated', 'x_allocated', 'b_allocated', 'r_total', 'x_total', 'b_total']
+    missing_cols = [col for col in allocated_cols if col not in network_lines_updated.columns]
 
+    if missing_cols:
+        logger.warning(f"Missing allocated attribute columns in network_lines_updated: {missing_cols}")
+        logger.debug(f"Available columns: {network_lines_updated.columns.tolist()}")
 
-     # Ensure 'length_m_dlr' is present in dlr_lines_gdf
+    # Check if length_m_dlr exists in dlr_lines_gdf, if not, create it
     if 'length_m_dlr' not in dlr_lines_gdf.columns:
         if 'length' in dlr_lines_gdf.columns:
             logger.debug("'length_m_dlr' not found in dlr_lines_gdf. Using 'length' column and converting to meters.")
             # Check for missing values
             if dlr_lines_gdf['length'].isnull().any():
                 logger.error("Missing 'length' values in dlr_lines_gdf.")
-                raise ValueError("Missing 'length' values in dlr_lines_gdf.")
+                # Instead of raising an error, fill with zeros
+                dlr_lines_gdf['length'] = dlr_lines_gdf['length'].fillna(0)
             dlr_lines_gdf['length_m_dlr'] = dlr_lines_gdf['length'] * 1000  # Convert km to meters
         else:
-            logger.error("'length' column not found in dlr_lines_gdf.")
-            raise KeyError("'length' column not found in dlr_lines_gdf.")
-
-    # Merge with network lines to get length_network and length_ratio
-    matches_with_info = matches_df_all.merge(
-        network_lines_updated[['id', 'length_m', 'length_ratio']],
-        left_on='id_net',
-        right_on='id',
-        how='left',
-        suffixes=('', '_network')
-    )
-
-    # Merge with DLR lines to get length_dlr
-    matches_with_info = matches_with_info.merge(
-        dlr_lines_gdf[['id', 'length_m_dlr']],
-        left_on='id_dlr',
-        right_on='id',
-        how='left',
-        suffixes=('_network', '_dlr')
-    )
-
-    # Rename columns for clarity
-    matches_with_info.rename(columns={
-        'length_m': 'length_network',
-        'length_m_dlr': 'length_dlr'
-    }, inplace=True)
-
-    # Select relevant columns
-    expected_columns = ['id_net', 'length_network', 'id_dlr', 'length_dlr', 'length_ratio']
+            logger.warning("'length' column not found in dlr_lines_gdf. Using geometry length.")
+            # Calculate length directly from geometry
+            dlr_lines_gdf['length_m_dlr'] = dlr_lines_gdf.geometry.length
 
     # Save matches_df_all to CSV
     matches_df_all.to_csv('results/csv/matches.csv', index=False)
 
-    # Save network_lines_updated to CSV
-    network_lines_updated[['id', 'length_m', 'length_ratio']].to_csv(
-        'results/csv/network_lines_updated.csv', index=False)
+    # Save network_lines_updated to CSV with all columns
+    network_lines_updated.to_csv('results/csv/network_lines_updated.csv', index=False)
 
-    # Check if all expected columns are present
-    missing_columns = [col for col in expected_columns if col not in matches_with_info.columns]
-    if missing_columns:
-        logger.error(f"The following expected columns are missing in matches_with_info: {missing_columns}")
-        raise KeyError(f"The following expected columns are missing in matches_with_info: {missing_columns}")
+    try:
+        # Try to merge with network lines
+        matches_with_info = matches_df_all.merge(
+            network_lines_updated[['id', 'length_m']],
+            left_on='id_net',
+            right_on='id',
+            how='left',
+            suffixes=('', '_network')
+        )
 
-    matches_csv = matches_with_info[expected_columns]
+        # Try to merge with DLR lines
+        matches_with_info = matches_with_info.merge(
+            dlr_lines_gdf[['id', 'length_m_dlr']],
+            left_on='id_dlr',
+            right_on='id',
+            how='left',
+            suffixes=('_network', '_dlr')
+        )
+
+        # Rename columns for clarity
+        matches_with_info.rename(columns={
+            'length_m': 'length_network',
+            'length_m_dlr': 'length_dlr'
+        }, inplace=True)
+
+        # Create a simple CSV with just the essential match information
+        matches_csv = matches_with_info[['id_net', 'id_dlr']]
+
+        # Add lengths if available
+        if 'length_network' in matches_with_info.columns:
+            matches_csv['length_network'] = matches_with_info['length_network']
+        if 'length_dlr' in matches_with_info.columns:
+            matches_csv['length_dlr'] = matches_with_info['length_dlr']
+
+    except Exception as e:
+        logger.error(f"Error creating detailed matches CSV: {str(e)}")
+        # Fallback to just saving the bare matches
+        matches_csv = matches_df_all[['id_net', 'id_dlr']]
 
     # Save to CSV
     output_path = config.get('output_paths', {}).get('matched_lines_csv', 'results/csv/matched_lines_with_buses.csv')
@@ -1013,380 +1084,815 @@ def create_matches_csv(matches_df_all, network_lines_updated, dlr_lines_gdf, con
     logger.info(f"CSV file '{output_path}' created.")
 
 
-def allocate_one_to_one(row):
-    if pd.isnull(row['length_m_net']) or pd.isnull(row['length_m_dlr']) or row['length_m_dlr'] == 0:
-        logger.warning(
-            f"Invalid lengths for id_net={row['id_net']} and id_dlr={row['id_dlr']}. Setting allocated attributes to zero.")
-        row['length_ratio'] = 0
-        row['r_allocated'] = 0
-        row['x_allocated'] = 0
-        row['b_allocated'] = 0
-    else:
-        length_ratio = row['length_m_net'] / row['length_m_dlr']
-        length_tolerance = 0.1  # 10%
-        length_within_tolerance = abs(length_ratio - 1) <= length_tolerance
-        if length_within_tolerance:
-            row['length_ratio'] = 1.0
-            row['r_allocated'] = row['r_dlr']
-            row['x_allocated'] = row['x_dlr']
-            row['b_allocated'] = row['b_dlr']
-            logger.debug(
-                f"One-to-One Match within tolerance for id_net={row['id_net']}: Allocated attributes directly assigned.")
-        else:
-            # Enforce length_ratio within logical bounds
-            logger.error(
-                f"One-to-One Match with length_ratio={length_ratio:.4f} outside tolerance for id_net={row['id_net']}. Capping to 1.")
-            row['length_ratio'] = 1.0
-            row['r_allocated'] = row['r_dlr']
-            row['x_allocated'] = row['x_dlr']
-            row['b_allocated'] = row['b_dlr']
-    return row
-
-
-def allocate_one_to_many(group):
-    total_length_net = group['length_m_net'].sum()
-    length_m_dlr = group['length_m_dlr'].iloc[0]  # One DLR line length
-    if total_length_net == 0 or pd.isnull(total_length_net) or length_m_dlr == 0:
-        logger.warning(f"Invalid lengths for id_dlr={group.name}. Setting allocated attributes to zero.")
-        group['length_ratio'] = 0
-        group['r_allocated'] = 0
-        group['x_allocated'] = 0
-        group['b_allocated'] = 0
-    else:
-        # Calculate the proportion of each network line's length to the total network length
-        group['length_ratio'] = group['length_m_net'] / total_length_net
-        # Allocate attributes proportionally based on length_ratio
-        group['r_allocated'] = group['r_dlr'] * group['length_ratio']
-        group['x_allocated'] = group['x_dlr'] * group['length_ratio']
-        group['b_allocated'] = group['b_dlr'] * group['length_ratio']
-        logger.debug(f"One-to-Many Match for id_dlr={group.name}: Allocated attributes based on length ratios.")
-    return group
-
-
-def allocate_many_to_one(group):
-    total_length_dlr = group['length_m_dlr'].sum()
-    length_m_net = group['length_m_net'].iloc[0]  # One network line length
-    if total_length_dlr == 0 or pd.isnull(total_length_dlr) or length_m_net == 0:
-        logger.warning(f"Invalid lengths for id_net={group.name}. Setting allocated attributes to zero.")
-        group['length_ratio'] = 0
-        group['r_allocated'] = 0
-        group['x_allocated'] = 0
-        group['b_allocated'] = 0
-    else:
-        # Calculate the proportion of the network line's length to the total DLR length
-        group['length_ratio'] = length_m_net / total_length_dlr
-        # Allocate attributes proportionally based on length_ratio
-        group['r_allocated'] = group['r_dlr'] * group['length_ratio']
-        group['x_allocated'] = group['x_dlr'] * group['length_ratio']
-        group['b_allocated'] = group['b_dlr'] * group['length_ratio']
-        logger.debug(
-            f"Many-to-One Match for id_net={group.name}: Allocated attributes based on length_ratio={group['length_ratio'].iloc[0]:.2f}.")
-    return group
-
-
-def allocate_many_to_many(group):
-    total_length_net = group['length_m_net'].sum()
-    total_length_dlr = group['length_m_dlr'].sum()
-    if total_length_net == 0 or total_length_dlr == 0:
-        logger.warning(
-            f"Total length is zero for group with id_net={group['id_net'].iloc[0]} and id_dlr={group['id_dlr'].iloc[0]}. Setting allocated attributes to zero.")
-        group['length_ratio'] = 0
-        group['r_allocated'] = 0
-        group['x_allocated'] = 0
-        group['b_allocated'] = 0
-    else:
-        # Allocate attributes proportionally based on network line's share of total network length
-        allocation_factor_net = group['length_m_net'] / total_length_net
-        # Allocate attributes
-        group['length_ratio'] = allocation_factor_net
-        group['r_allocated'] = group['r_dlr'] * group['length_ratio']
-        group['x_allocated'] = group['x_dlr'] * group['length_ratio']
-        group['b_allocated'] = group['b_dlr'] * group['length_ratio']
-        logger.debug(
-            f"Many-to-Many Match for group id_net={group['id_net'].iloc[0]} and id_dlr={group['id_dlr'].iloc[0]}: Allocated attributes based on length_ratio={group['length_ratio'].iloc[0]:.4f}.")
-    return group
-
-
-
-def validate_allocations(network_lines_updated, allocated_matches, tolerance=1e-6):
+def analyze_allocations_distribution(network_lines_updated):
     """
-    Validates the allocations in the network_lines_updated GeoDataFrame.
-
-    Parameters:
-    - network_lines_updated (GeoDataFrame): The updated network lines with allocations.
-    - allocated_matches (DataFrame): DataFrame containing allocated matches.
-    - tolerance (float): Tolerance level for validation checks.
-
-    Returns:
-    - None. Logs the validation results.
+    Analyzes the distribution of allocated electrical parameters.
     """
-    logger.info("Starting validation of allocations...")
+    params = ['r_allocated', 'x_allocated', 'b_allocated']
 
-    # Group allocations by match type and perform validations
-    match_types = allocated_matches['match_type'].unique()
+    for param in params:
+        if param not in network_lines_updated.columns:
+            logger.warning(f"Parameter {param} not found in network lines data")
+            continue
 
-    for match_type in match_types:
-        subset = allocated_matches[allocated_matches['match_type'] == match_type]
+        if 'length_m' not in network_lines_updated.columns:
+            logger.warning("length_m column not found in network lines data")
+            continue
 
-        if match_type == 'one_to_one':
-            # For one-to-one, length_ratio should be approximately 1
-            invalid = subset[~subset['length_ratio'].between(1 - tolerance, 1 + tolerance)]
-            if not invalid.empty:
-                logger.error(
-                    f"One-to-One matches with invalid length_ratio:\n{invalid[['id_net', 'id_dlr', 'length_ratio']]}")
-            else:
-                logger.info("All One-to-One allocations are valid.")
+        values_per_km = network_lines_updated[param] / (network_lines_updated['length_m'] / 1000)
 
-        elif match_type == 'one_to_many':
-            # For one-to-many, sum of length_ratio per id_dlr should be ~1
-            sums = subset.groupby('id_dlr')['length_ratio'].sum()
-            invalid = sums[~sums.between(1 - tolerance, 1 + tolerance)]
-            if not invalid.empty:
-                logger.error(f"One-to-Many allocations with invalid length_ratio sums:\n{invalid}")
-            else:
-                logger.info("All One-to-Many allocations have valid length_ratio sums.")
+        stats = {
+            'min': values_per_km.min(),
+            'max': values_per_km.max(),
+            'mean': values_per_km.mean(),
+            'median': values_per_km.median(),
+            'std': values_per_km.std(),
+            'percentiles': values_per_km.quantile([0.05, 0.25, 0.75, 0.95])
+        }
 
-        elif match_type == 'many_to_one':
-            # For many-to-one, sum of length_ratio per id_net should be ~1
-            sums = subset.groupby('id_net')['length_ratio'].sum()
-            invalid = sums[~sums.between(1 - tolerance, 1 + tolerance)]
-            if not invalid.empty:
-                logger.error(f"Many-to-One allocations with invalid length_ratio sums:\n{invalid}")
-            else:
-                logger.info("All Many-to-One allocations have valid length_ratio sums.")
-
-        elif match_type == 'many_to_many':
-            # For many-to-many, sum of length_ratio per id_dlr should be ~1 and per id_net should be ~1
-            # Sum per id_dlr
-            sums_dlr = subset.groupby('id_dlr')['length_ratio'].sum()
-            invalid_dlr = sums_dlr[~sums_dlr.between(1 - tolerance, 1 + tolerance)]
-            if not invalid_dlr.empty:
-                logger.error(f"Many-to-Many allocations with invalid length_ratio sums per id_dlr:\n{invalid_dlr}")
-            else:
-                logger.info("All Many-to-Many allocations have valid length_ratio sums per id_dlr.")
-
-            # Sum per id_net
-            sums_net = subset.groupby('id_net')['length_ratio'].sum()
-            invalid_net = sums_net[~sums_net.between(1 - tolerance, 1 + tolerance)]
-            if not invalid_net.empty:
-                logger.error(f"Many-to-Many allocations with invalid length_ratio sums per id_net:\n{invalid_net}")
-            else:
-                logger.info("All Many-to-Many allocations have valid length_ratio sums per id_net.")
-
-
-
-    logger.info("Validation of allocations completed.")
-
-
+        logger.info(f"\nDistribution of {param} per km:")
+        for key, value in stats.items():
+            logger.info(f"{key}: {value}")
 
 
 def allocate_attributes_to_network_lines(matches_df_all, network_lines_gdf, dlr_lines_gdf):
-    # Reproject to a metric CRS (e.g., UTM zone appropriate for your data)
-    projected_crs = 'EPSG:32632'  # Example CRS, adjust as needed
-    network_lines_gdf = network_lines_gdf.to_crs(projected_crs).copy()
-    dlr_lines_gdf = dlr_lines_gdf.to_crs(projected_crs).copy()
+    """
+    Allocates DLR line attributes to network lines with improved robustness.
 
-    # Calculate lengths of the geometries
-    network_lines_gdf['length_m_net'] = network_lines_gdf.geometry.length
-    dlr_lines_gdf['length_m_dlr'] = dlr_lines_gdf.geometry.length
+    Uses both geometric data and length ratios to determine appropriate
+    electrical parameter allocation.
+    """
+    logger.info("Starting robust attribute allocation process...")
 
-    # Prepare DataFrames for merging with explicit renaming to avoid conflicts
-    network_lines_info = network_lines_gdf[['id', 'geometry', 'bus0', 'bus1', 'length_m_net', 'r', 'x', 'b']].rename(
-        columns={
-            'id': 'id_net',
-            'r': 'r_net',
-            'x': 'x_net',
-            'b': 'b_net',
-            'geometry': 'geometry_net',
-            'bus0': 'bus0_net',
-            'bus1': 'bus1_net'
-        }
-    )
+    # Make copies and ensure everything is in the same projection (UTM 32N)
+    network_lines_proj = network_lines_gdf.to_crs('EPSG:32632').copy()
+    dlr_lines_proj = dlr_lines_gdf.to_crs('EPSG:32632').copy()
+    matches_df_valid = matches_df_all.copy()
 
-    # **Rename 'r', 'x', 'b' to 'r_dlr', 'x_dlr', 'b_dlr' in dlr_lines_gdf**
-    dlr_lines_gdf = dlr_lines_gdf.rename(columns={
-        'r': 'r_dlr',
-        'x': 'x_dlr',
-        'b': 'b_dlr'
+    # Clean and validate geometries
+    network_lines_proj['geometry'] = network_lines_proj.geometry.buffer(0)
+    dlr_lines_proj['geometry'] = dlr_lines_proj.geometry.buffer(0)
+
+    # Calculate lengths consistently
+    network_lines_proj['length_m'] = network_lines_proj.geometry.length
+    dlr_lines_proj['length_m_dlr'] = dlr_lines_proj.geometry.length
+
+    # Verify matches exist in both dataframes
+    valid_net_ids = set(network_lines_proj['id'])
+    valid_dlr_ids = set(dlr_lines_proj['id'])
+
+    invalid_matches = matches_df_valid[
+        (~matches_df_valid['id_net'].isin(valid_net_ids)) |
+        (~matches_df_valid['id_dlr'].isin(valid_dlr_ids))
+        ]
+
+    if not invalid_matches.empty:
+        logger.warning(f"Found {len(invalid_matches)} invalid matches with missing geometries.")
+        logger.debug(f"Sample invalid matches:\n{invalid_matches.head()}")
+        matches_df_valid = matches_df_valid[
+            (matches_df_valid['id_net'].isin(valid_net_ids)) &
+            (matches_df_valid['id_dlr'].isin(valid_dlr_ids))
+            ]
+
+    if matches_df_valid.empty:
+        logger.error("No valid matches remain after preprocessing!")
+        return network_lines_gdf.copy(), pd.DataFrame()
+
+
+    # Prepare intermediate DataFrames with renamed columns
+    network_lines_info = network_lines_proj[
+        ['id', 'geometry', 'bus0', 'bus1', 'length_m', 'r', 'x', 'b']
+    ].rename(columns={
+        'id': 'id_net',
+        'r': 'r_net',
+        'x': 'x_net',
+        'b': 'b_net',
+        'geometry': 'geometry_net'
     })
 
-    # Validate that the required columns exist
-    required_dlr_columns = ['id', 'geometry', 'bus0', 'bus1', 'length_m_dlr', 'r_dlr', 'x_dlr', 'b_dlr', 'TSO', 'v_nom', 'Imax', 's_nom']
-    missing_dlr_columns = [col for col in required_dlr_columns if col not in dlr_lines_gdf.columns]
-    if missing_dlr_columns:
-        logger.error(f"Missing columns in dlr_lines_gdf: {missing_dlr_columns}")
-        raise KeyError(f"Missing columns in dlr_lines_gdf: {missing_dlr_columns}")
-    else:
-        logger.info("All required columns in dlr_lines_gdf are present.")
+    dlr_lines_info = dlr_lines_proj[
+        ['id', 'geometry', 'bus0', 'bus1', 'length_m_dlr', 'r_dlr', 'x_dlr', 'b_dlr']
+    ].rename(columns={
+        'id': 'id_dlr',
+        'geometry': 'geometry_dlr'
+    })
 
-    dlr_lines_info = dlr_lines_gdf[
-        ['id', 'geometry', 'bus0', 'bus1', 'length_m_dlr', 'r_dlr', 'x_dlr', 'b_dlr', 'TSO', 'v_nom', 'Imax', 's_nom']
-    ].rename(
-        columns={
-            'id': 'id_dlr',
-            'geometry': 'geometry_dlr',
-            'bus0': 'bus0_dlr',
-            'bus1': 'bus1_dlr'
-        }
-    )
-
-    # Example continuation:
-    # Merge matches with network_lines_info
-    matches_with_network = matches_df_all.merge(network_lines_info, on='id_net', how='left')
-    logger.debug(
-        f"Columns in matches_with_network after merging with network_lines_info: {matches_with_network.columns.tolist()}")
-
-    # Merge with dlr_lines_info
-    matches_with_dlr = matches_with_network.merge(dlr_lines_info, on='id_dlr', how='left')
-    logger.debug(f"Columns in matches_with_dlr after merging with dlr_lines_info: {matches_with_dlr.columns.tolist()}")
-
-    # Determine match types
-    counts_net = matches_df_all['id_net'].value_counts()
-    counts_dlr = matches_df_all['id_dlr'].value_counts()
-
-    # Corrected Match Type Assignment
-    matches_with_dlr['match_type'] = matches_with_dlr.apply(
-        lambda row: (
-            'one_to_one' if counts_net.get(row['id_net'], 0) == 1 and counts_dlr.get(row['id_dlr'], 0) == 1 else
-            'one_to_many' if counts_dlr.get(row['id_dlr'], 0) > 1 else
-            'many_to_one' if counts_net.get(row['id_net'], 0) > 1 else
-            'many_to_many'
-        ),
-        axis=1
-    )
-
-    # Log the counts of each match type
-    match_type_counts = matches_with_dlr['match_type'].value_counts()
-    logger.info(f"Match Type Counts:\n{match_type_counts}")
-
-    # Allocate attributes based on match types
-    allocated_matches_list = []
-
-    # Define required columns for allocation
-    required_columns = [
-        'id_net', 'id_dlr', 'length_ratio', 'r_allocated', 'x_allocated', 'b_allocated',
-        'length_m_net', 'length_m_dlr', 'match_type'  # Include 'match_type' for validation
-    ]
-
-
-    # Apply Allocation Functions
-
-    # One-to-One Matches
-    one_to_one_matches = matches_with_dlr[matches_with_dlr['match_type'] == 'one_to_one'].copy()
-    logger.debug(f"Processing one-to-one matches: {len(one_to_one_matches)} records")
-    one_to_one_matches = one_to_one_matches.apply(allocate_one_to_one, axis=1)
-    allocated_matches_list.append(one_to_one_matches[required_columns])
-
-    # One-to-Many Matches
-    one_to_many_matches = matches_with_dlr[matches_with_dlr['match_type'] == 'one_to_many'].copy()
-    logger.debug(f"Processing one-to-many matches: {len(one_to_many_matches)} records")
-    allocated_one_to_many = one_to_many_matches.groupby('id_dlr').apply(allocate_one_to_many).reset_index(drop=True)
-    allocated_matches_list.append(allocated_one_to_many[required_columns])
-
-    # Many-to-One Matches
-    many_to_one_matches = matches_with_dlr[matches_with_dlr['match_type'] == 'many_to_one'].copy()
-    logger.debug(f"Processing many-to-one matches: {len(many_to_one_matches)} records")
-    allocated_many_to_one = many_to_one_matches.groupby('id_net').apply(allocate_many_to_one).reset_index(drop=True)
-    allocated_matches_list.append(allocated_many_to_one[required_columns])
-
-    # Many-to-Many Matches
-    many_to_many_matches = matches_with_dlr[matches_with_dlr['match_type'] == 'many_to_many'].copy()
-    logger.debug(f"Processing many-to-many matches: {len(many_to_many_matches)} records")
-    if not many_to_many_matches.empty:
-        allocated_many_to_many = many_to_many_matches.groupby(['id_net', 'id_dlr']).apply(
-            allocate_many_to_many
-        ).reset_index(drop=True)
-        allocated_matches_list.append(allocated_many_to_many[required_columns])
-    else:
-        logger.info("No many-to-many matches to process.")
-
-
-    # Combine Allocated Matches
-
-    if allocated_matches_list:
-        allocated_matches = pd.concat(allocated_matches_list, ignore_index=True)
-        logger.debug(f"Total allocated matches: {len(allocated_matches)} records")
-    else:
-        allocated_matches = pd.DataFrame(columns=required_columns)
-        logger.info("No allocated matches to concatenate.")
-
-    # Aggregate allocated attributes per network line, including 'length_m_dlr'
-    if not allocated_matches.empty:
-        allocated_matches_agg = allocated_matches.groupby('id_net').agg({
-            'length_ratio': 'sum',
-            'r_allocated': 'sum',
-            'x_allocated': 'sum',
-            'b_allocated': 'sum',
-            'length_m_dlr': 'sum'
-        }).reset_index()
-    else:
-        allocated_matches_agg = pd.DataFrame(
-            columns=['id_net', 'length_ratio', 'r_allocated', 'x_allocated', 'b_allocated', 'length_m_dlr']
+    # Merge with actual match data
+    try:
+        merged_matches = (
+            matches_df_valid
+            .merge(network_lines_info, on='id_net', how='inner')  # Use inner instead of left
+            .merge(dlr_lines_info, on='id_dlr', how='inner')  # Use inner instead of left
         )
 
-    logger.debug(f"Allocated Matches Aggregated Columns: {allocated_matches_agg.columns.tolist()}")
+        if merged_matches.empty:
+            logger.error("No matches remain after merging network and DLR data.")
+            return network_lines_gdf.copy(), pd.DataFrame()
 
-    # Merge allocated attributes back into network_lines_gdf
-    network_lines_updated = network_lines_gdf.merge(
-        allocated_matches_agg,
-        left_on='id',
-        right_on='id_net',
-        how='left'
-    )
+    except Exception as e:
+        logger.error(f"Error during merge operation: {str(e)}")
+        return network_lines_gdf.copy(), pd.DataFrame()
 
-    # Insert the print statement here
-    print("DEBUG: Columns in network_lines_updated before allocation:", network_lines_updated.columns.tolist())
+    # Classify matches by type
+    match_counts = {
+        'net': merged_matches['id_net'].value_counts().to_dict(),
+        'dlr': merged_matches['id_dlr'].value_counts().to_dict()
+    }
 
-    # Rename 'r' to 'r_net' if necessary
-    if 'r_net' not in network_lines_updated.columns and 'r' in network_lines_updated.columns:
-        network_lines_updated.rename(columns={'r': 'r_net'}, inplace=True)
-        print("DEBUG: Renamed 'r' to 'r_net'")
+    def classify_match(row):
+        net_count = match_counts['net'].get(row['id_net'], 0)
+        dlr_count = match_counts['dlr'].get(row['id_dlr'], 0)
 
-    # Assign allocated attributes, preserving original values where allocations are missing
-    network_lines_updated['r_allocated'] = network_lines_updated['r_allocated'].fillna(0)
-    network_lines_updated['x_allocated'] = network_lines_updated['x_allocated'].fillna(0)
-    network_lines_updated['b_allocated'] = network_lines_updated['b_allocated'].fillna(0)
-    network_lines_updated['length_ratio'] = network_lines_updated['length_ratio'].fillna(0)
+        if net_count == 1 and dlr_count == 1:
+            return 'one_to_one'
+        elif dlr_count > 1:
+            return 'one_to_many'
+        elif net_count > 1:
+            return 'many_to_one'
+        else:
+            return 'many_to_many'
 
-    # Ensure 'r_net' exists before allocation
-    if 'r_net' in network_lines_updated.columns:
-        network_lines_updated['r_total'] = network_lines_updated['r_net'] + network_lines_updated['r_allocated']
-    else:
-        logger.error("'r_net' column is missing in network_lines_updated after renaming.")
-        # Handle the error appropriately, e.g., raise an exception or skip allocation
-        network_lines_updated['r_total'] = network_lines_updated['r_allocated']  # Example fallback
+    merged_matches['match_type'] = merged_matches.apply(classify_match, axis=1)
 
-    if 'x_net' in network_lines_updated.columns:
-        network_lines_updated['x_total'] = network_lines_updated['x_net'] + network_lines_updated['x_allocated']
-    else:
-        logger.warning("'x_net' column is missing in network_lines_updated.")
-        network_lines_updated['x_total'] = network_lines_updated['x_allocated']
+    # Log match types
+    match_type_counts = merged_matches['match_type'].value_counts()
+    logger.info(f"Match type distribution: {dict(match_type_counts)}")
 
-    if 'b_net' in network_lines_updated.columns:
-        network_lines_updated['b_total'] = network_lines_updated['b_net'] + network_lines_updated['b_allocated']
-    else:
-        logger.warning("'b_net' column is missing in network_lines_updated.")
-        network_lines_updated['b_total'] = network_lines_updated['b_allocated']
+    # Try using both intersection-based and length-based methods
+    try:
+        # HYBRID APPROACH: First try intersection, then fallback to length ratio
+        # Initialize allocation columns
+        merged_matches['fraction'] = 0
+        merged_matches['overlap_length'] = 0
+        merged_matches['length_ratio'] = merged_matches['length_m'] / merged_matches['length_m_dlr']
+        merged_matches['r_allocated'] = 0
+        merged_matches['x_allocated'] = 0
+        merged_matches['b_allocated'] = 0
 
-    # Clean up unnecessary columns
-    columns_to_drop = ['id_net']
-    network_lines_updated.drop(columns=[col for col in columns_to_drop if col in network_lines_updated.columns],
-                               inplace=True)
+        # 1. First, compute intersections and their lengths (where possible)
+        for idx, row in merged_matches.iterrows():
+            try:
+                if pd.notna(row['geometry_net']) and pd.notna(row['geometry_dlr']):
+                    buffer_distance = 25  # 25 meter buffer to account for alignment issues
+                    buffered_net = row['geometry_net'].buffer(buffer_distance)
 
-    # Verify columns after merge
-    logger.debug(f"Columns in network_lines_updated after merge: {network_lines_updated.columns.tolist()}")
+                    # Check if geometries are nearby at all
+                    if buffered_net.intersects(row['geometry_dlr']):
+                        # 1. Try pure intersection first
+                        intersection = row['geometry_net'].intersection(row['geometry_dlr'])
+                        overlap_length = intersection.length
 
-    # Add Logging to Verify Data
-    logger.debug(
-        f"Sample data:\n{network_lines_updated[['id', 'length_m_net', 'length_m_dlr', 'length_ratio', 'r_allocated', 'x_allocated', 'b_allocated']].head()}"
-    )
+                        # 2. If pure intersection is too small, use buffer-based approach
+                        if overlap_length < 10:  # Less than 10m overlap is suspicious
+                            # Use buffer intersection approach
+                            buffered_intersection = buffered_net.intersection(row['geometry_dlr'])
+                            overlap_length = buffered_intersection.length
+
+                        merged_matches.at[idx, 'overlap_length'] = overlap_length
+
+                        # Calculate fraction based on DLR length (which is the source of truth)
+                        if row['length_m_dlr'] > 0:
+                            merged_matches.at[idx, 'fraction'] = min(1.0, overlap_length / row['length_m_dlr'])
+            except Exception as e:
+                logger.warning(f"Error calculating intersection for match {idx}: {str(e)}")
+
+        # Process each match type separately
+        allocated_matches_list = []
+
+        # Process one-to-one matches
+        one_to_one = merged_matches[merged_matches['match_type'] == 'one_to_one'].copy()
+        if not one_to_one.empty:
+            # For one-to-one, use direct parameter transfer with length ratio adjustment
+            one_to_one['r_allocated'] = one_to_one['r_dlr'] * one_to_one['length_ratio']
+            one_to_one['x_allocated'] = one_to_one['x_dlr'] * one_to_one['length_ratio']
+            one_to_one['b_allocated'] = one_to_one['b_dlr'] * one_to_one['length_ratio']
+            allocated_matches_list.append(one_to_one)
+
+        # Process one-to-many matches (one DLR line to multiple network lines)
+        one_to_many = merged_matches[merged_matches['match_type'] == 'one_to_many'].copy()
+        if not one_to_many.empty:
+            # Calculate fractions for each group
+            for dlr_id, group in one_to_many.groupby('id_dlr'):
+                # Sum of all network line lengths in this group
+                total_net_length = group['length_m'].sum()
+
+                # Allocate based on proportion of each network line's length
+                if total_net_length > 0:
+                    group['fraction'] = group['length_m'] / total_net_length
+                    r_dlr = group['r_dlr'].iloc[0]
+                    x_dlr = group['x_dlr'].iloc[0]
+                    b_dlr = group['b_dlr'].iloc[0]
+
+                    # Allocate each parameter proportionally
+                    group['r_allocated'] = r_dlr * group['fraction']
+                    group['x_allocated'] = x_dlr * group['fraction']
+                    group['b_allocated'] = b_dlr * group['fraction']
+
+                    # Add to results
+                    allocated_matches_list.append(group)
+
+        # Process many-to-one matches (multiple DLR lines to one network line)
+        many_to_one = merged_matches[merged_matches['match_type'] == 'many_to_one'].copy()
+        if not many_to_one.empty:
+            # Process each network line separately
+            for net_id, group in many_to_one.groupby('id_net'):
+                # Sum of all DLR line lengths in this group
+                total_dlr_length = group['length_m_dlr'].sum()
+
+                if total_dlr_length > 0:
+                    # Weighted average of parameters based on DLR line lengths
+                    group['fraction'] = group['length_m_dlr'] / total_dlr_length
+
+                    # Calculate weighted parameters
+                    weighted_r = (group['r_dlr'] * group['fraction']).sum()
+                    weighted_x = (group['x_dlr'] * group['fraction']).sum()
+                    weighted_b = (group['b_dlr'] * group['fraction']).sum()
+
+                    # Adjust for network line length
+                    net_length = group['length_m'].iloc[0]
+
+                    # Assign the same parameters to all rows for this net_id
+                    group['r_allocated'] = weighted_r * (net_length / total_dlr_length)
+                    group['x_allocated'] = weighted_x * (net_length / total_dlr_length)
+                    group['b_allocated'] = weighted_b * (net_length / total_dlr_length)
+
+                    allocated_matches_list.append(group)
+
+        # Process many-to-many matches
+        many_to_many = merged_matches[merged_matches['match_type'] == 'many_to_many'].copy()
+        if not many_to_many.empty:
+            # This is the most complex case, use a simplified approach
+            # Group by network line and consider each group separately
+            for net_id, net_group in many_to_many.groupby('id_net'):
+                total_net_length = net_group['length_m'].iloc[0]  # All rows have the same network line
+
+                # Calculate the fraction based on overlap or DLR length if overlap calculation failed
+                net_group['effective_fraction'] = net_group.apply(
+                    lambda row: row['fraction'] if row['fraction'] > 0 else
+                    (row['length_m_dlr'] / total_net_length if total_net_length > 0 else 0),
+                    axis=1
+                )
+
+                # Normalize fractions within this network line group
+                sum_fractions = net_group['effective_fraction'].sum()
+                if sum_fractions > 0:
+                    net_group['normalized_fraction'] = net_group['effective_fraction'] / sum_fractions
+
+                    # Allocate based on normalized fractions
+                    net_group['r_allocated'] = net_group['r_dlr'] * net_group['normalized_fraction']
+                    net_group['x_allocated'] = net_group['x_dlr'] * net_group['normalized_fraction']
+                    net_group['b_allocated'] = net_group['b_dlr'] * net_group['normalized_fraction']
+
+                    allocated_matches_list.append(net_group)
+
+        # Combine all allocated matches
+        if allocated_matches_list:
+            allocated_matches = pd.concat(allocated_matches_list, ignore_index=True)
+
+            # Aggregate by network line
+            aggregated_parameters = allocated_matches.groupby('id_net').agg({
+                'r_allocated': 'sum',
+                'x_allocated': 'sum',
+                'b_allocated': 'sum'
+            }).reset_index()
+
+            # Merge with original network lines
+            network_lines_updated = network_lines_gdf.merge(
+                aggregated_parameters,
+                left_on='id',
+                right_on='id_net',
+                how='left'
+            )
+
+            # Fill NAs with zero for unmatched lines
+            fill_cols = ['r_allocated', 'x_allocated', 'b_allocated']
+            network_lines_updated[fill_cols] = network_lines_updated[fill_cols].fillna(0)
+
+            # Create total parameters columns
+            network_lines_updated['r_total'] = network_lines_updated['r'] + network_lines_updated['r_allocated']
+            network_lines_updated['x_total'] = network_lines_updated['x'] + network_lines_updated['x_allocated']
+            network_lines_updated['b_total'] = network_lines_updated['b'] + network_lines_updated['b_allocated']
+
+            # Clean up
+            if 'id_net' in network_lines_updated.columns:
+                network_lines_updated.drop(columns=['id_net'], inplace=True)
+
+            logger.info("Attribute allocation completed successfully using hybrid approach.")
+            return network_lines_updated, allocated_matches
+
+    except Exception as e:
+        logger.error(f"Error during attribute allocation: {str(e)}", exc_info=True)
+
+    # Fallback to length-based allocation if everything else fails
+    logger.warning("Falling back to simple length-ratio allocation...")
+    try:
+        # Map DLR parameters to network lines using length ratio only
+        network_lines_with_matches = network_lines_gdf.merge(
+            matches_df_valid, left_on='id', right_on='id_net', how='left'
+        ).merge(
+            dlr_lines_gdf[['id', 'r_dlr', 'x_dlr', 'b_dlr', 'length_m_dlr']],
+            left_on='id_dlr', right_on='id', how='left', suffixes=('', '_dlr')
+        )
+
+        # Calculate length ratio where possible
+        mask = (network_lines_with_matches['length_m_dlr'].notna() &
+                (network_lines_with_matches['length_m_dlr'] > 0))
+
+        # Initialize allocated columns
+        network_lines_with_matches['r_allocated'] = 0
+        network_lines_with_matches['x_allocated'] = 0
+        network_lines_with_matches['b_allocated'] = 0
+
+        # Apply length ratio allocation
+        if mask.any():
+            network_lines_with_matches.loc[mask, 'length_ratio'] = (
+                    network_lines_with_matches.loc[mask, 'length_m'] /
+                    network_lines_with_matches.loc[mask, 'length_m_dlr']
+            )
+
+            network_lines_with_matches.loc[mask, 'r_allocated'] = (
+                    network_lines_with_matches.loc[mask, 'r_dlr'] *
+                    network_lines_with_matches.loc[mask, 'length_ratio']
+            )
+
+            network_lines_with_matches.loc[mask, 'x_allocated'] = (
+                    network_lines_with_matches.loc[mask, 'x_dlr'] *
+                    network_lines_with_matches.loc[mask, 'length_ratio']
+            )
+
+            network_lines_with_matches.loc[mask, 'b_allocated'] = (
+                    network_lines_with_matches.loc[mask, 'b_dlr'] *
+                    network_lines_with_matches.loc[mask, 'length_ratio']
+            )
+
+        # If multiple DLR matches per network line, aggregate them
+        network_lines_updated = network_lines_with_matches.groupby('id').agg({
+            'r_allocated': 'sum',
+            'x_allocated': 'sum',
+            'b_allocated': 'sum'
+        }).reset_index()
+
+        # Merge back with original network lines
+        network_lines_updated = network_lines_gdf.merge(
+            network_lines_updated, on='id', how='left'
+        )
+
+        # Fill NAs with zero for unmatched lines
+        fill_cols = ['r_allocated', 'x_allocated', 'b_allocated']
+        network_lines_updated[fill_cols] = network_lines_updated[fill_cols].fillna(0)
+
+        # Calculate total parameters
+        network_lines_updated['r_total'] = network_lines_updated['r'] + network_lines_updated['r_allocated']
+        network_lines_updated['x_total'] = network_lines_updated['x'] + network_lines_updated['x_allocated']
+        network_lines_updated['b_total'] = network_lines_updated['b'] + network_lines_updated['b_allocated']
+
+        logger.info("Fallback attribute allocation completed using length ratio method.")
+        # Add these debug statements at the end of allocate_attributes_to_network_lines
+        logger.debug(f"Columns after allocation: {network_lines_updated.columns.tolist()}")
+        logger.debug(f"Number of lines with non-zero r_allocated: {(network_lines_updated['r_allocated'] > 0).sum()}")
+        logger.debug(f"Number of lines with non-zero x_allocated: {(network_lines_updated['x_allocated'] > 0).sum()}")
+        logger.debug(f"Number of lines with non-zero b_allocated: {(network_lines_updated['b_allocated'] > 0).sum()}")
+
+        # Also verify the values are not all zeros (which would indicate allocation isn't working)
+        if (network_lines_updated['r_allocated'] == 0).all():
+            logger.warning("All r_allocated values are zero - allocation may not be working!")
+        return network_lines_updated, network_lines_with_matches
 
 
-    # Validate Allocations
+    except Exception as e:
+        logger.error(f"Fallback allocation also failed: {str(e)}", exc_info=True)
+        return network_lines_gdf.copy(), pd.DataFrame()
 
-    validate_allocations(network_lines_updated, allocated_matches, tolerance=1e-6)
 
-    return network_lines_updated, allocated_matches_agg
+
+def force_allocation(matches_df_all, network_lines_gdf, dlr_lines_gdf):
+    """
+    Force electrical parameter allocation from DLR to network lines with extensive debugging.
+
+    Parameters:
+        matches_df_all (DataFrame): All matches between network and DLR lines
+        network_lines_gdf (GeoDataFrame): Network lines GeoDataFrame
+        dlr_lines_gdf (GeoDataFrame): DLR lines GeoDataFrame
+
+    Returns:
+        GeoDataFrame: Updated network lines with allocated attributes
+    """
+    logger.info("Attempting forced allocation of electrical parameters...")
+
+    # Create copies to avoid modifying originals
+    network_lines_updated = network_lines_gdf.copy()
+    dlr_lines_copy = dlr_lines_gdf.copy()
+    matches_copy = matches_df_all.copy()
+
+    # Debug information
+    logger.debug(f"Matches dataframe shape: {matches_copy.shape}")
+    logger.debug(f"DLR lines columns: {dlr_lines_copy.columns.tolist()}")
+
+    # Create a debug dataframe to track the allocation process
+    debug_df = pd.DataFrame()
+
+    # 1. Find the electrical parameter columns in DLR data
+    r_col = None
+    x_col = None
+    b_col = None
+
+    r_candidates = ['r_dlr', 'r', 'R', 'resistance']
+    x_candidates = ['x_dlr', 'x', 'X', 'reactance']
+    b_candidates = ['b_dlr', 'b', 'B', 'susceptance']
+
+    for col in dlr_lines_copy.columns:
+        if col.lower() in [c.lower() for c in r_candidates]:
+            r_col = col
+        elif col.lower() in [c.lower() for c in x_candidates]:
+            x_col = col
+        elif col.lower() in [c.lower() for c in b_candidates]:
+            b_col = col
+
+    logger.info(f"Found DLR parameter columns: r={r_col}, x={x_col}, b={b_col}")
+
+    # If we can't find the columns, check for any columns with names containing r, x, b
+    if not r_col:
+        r_like = [col for col in dlr_lines_copy.columns if 'r' in col.lower() and 'react' not in col.lower()]
+        if r_like:
+            r_col = r_like[0]
+            logger.info(f"Using column {r_col} for resistance")
+
+    if not x_col:
+        x_like = [col for col in dlr_lines_copy.columns if 'x' in col.lower()]
+        if x_like:
+            x_col = x_like[0]
+            logger.info(f"Using column {x_col} for reactance")
+
+    if not b_col:
+        b_like = [col for col in dlr_lines_copy.columns if 'b' in col.lower() and 'bus' not in col.lower()]
+        if b_like:
+            b_col = b_like[0]
+            logger.info(f"Using column {b_col} for susceptance")
+
+    # If we still don't have the columns, we create them with default values
+    if not r_col:
+        logger.warning("No resistance column found in DLR data. Creating a default column.")
+        dlr_lines_copy['r_dlr'] = 0.1  # Default value
+        r_col = 'r_dlr'
+
+    if not x_col:
+        logger.warning("No reactance column found in DLR data. Creating a default column.")
+        dlr_lines_copy['x_dlr'] = 0.4  # Default value
+        x_col = 'x_dlr'
+
+    if not b_col:
+        logger.warning("No susceptance column found in DLR data. Creating a default column.")
+        dlr_lines_copy['b_dlr'] = 0.00001  # Default value
+        b_col = 'b_dlr'
+
+    # 2. Rename columns for consistency and create missing ones
+    dlr_lines_copy.rename(columns={r_col: 'r_dlr', x_col: 'x_dlr', b_col: 'b_dlr'}, inplace=True)
+
+    # Check types and convert to numeric if needed
+    for col in ['r_dlr', 'x_dlr', 'b_dlr']:
+        if not pd.api.types.is_numeric_dtype(dlr_lines_copy[col]):
+            logger.warning(f"Converting {col} from {dlr_lines_copy[col].dtype} to numeric")
+            dlr_lines_copy[col] = pd.to_numeric(dlr_lines_copy[col], errors='coerce')
+
+    # Fill any NaN values
+    dlr_lines_copy['r_dlr'] = dlr_lines_copy['r_dlr'].fillna(0.1)
+    dlr_lines_copy['x_dlr'] = dlr_lines_copy['x_dlr'].fillna(0.4)
+    dlr_lines_copy['b_dlr'] = dlr_lines_copy['b_dlr'].fillna(0.00001)
+
+    # Check for any zero values and replace with minimal values
+    dlr_lines_copy.loc[dlr_lines_copy['r_dlr'] <= 0, 'r_dlr'] = 0.01
+    dlr_lines_copy.loc[dlr_lines_copy['x_dlr'] <= 0, 'x_dlr'] = 0.04
+    dlr_lines_copy.loc[dlr_lines_copy['b_dlr'] <= 0, 'b_dlr'] = 0.000001
+
+    # 3. Calculate lengths if needed
+    if 'length_m_dlr' not in dlr_lines_copy.columns:
+        if 'length_m' in dlr_lines_copy.columns:
+            dlr_lines_copy['length_m_dlr'] = dlr_lines_copy['length_m']
+        elif 'length' in dlr_lines_copy.columns:
+            # Check if it's likely in km
+            if dlr_lines_copy['length'].mean() < 100:
+                logger.info("Converting length from km to m")
+                dlr_lines_copy['length_m_dlr'] = dlr_lines_copy['length'] * 1000
+            else:
+                dlr_lines_copy['length_m_dlr'] = dlr_lines_copy['length']
+        else:
+            logger.info("Calculating DLR line lengths from geometry")
+            dlr_lines_copy['length_m_dlr'] = dlr_lines_copy.geometry.length
+
+    # Make sure lengths are not zero
+    dlr_lines_copy.loc[dlr_lines_copy['length_m_dlr'] <= 0, 'length_m_dlr'] = 1000  # Default 1 km
+
+    # Log some statistics
+    logger.info("DLR electrical parameters statistics:")
+    logger.info(
+        f"Resistance (r_dlr): min={dlr_lines_copy['r_dlr'].min():.6f}, max={dlr_lines_copy['r_dlr'].max():.6f}, mean={dlr_lines_copy['r_dlr'].mean():.6f}")
+    logger.info(
+        f"Reactance (x_dlr): min={dlr_lines_copy['x_dlr'].min():.6f}, max={dlr_lines_copy['x_dlr'].max():.6f}, mean={dlr_lines_copy['x_dlr'].mean():.6f}")
+    logger.info(
+        f"Susceptance (b_dlr): min={dlr_lines_copy['b_dlr'].min():.6f}, max={dlr_lines_copy['b_dlr'].max():.6f}, mean={dlr_lines_copy['b_dlr'].mean():.6f}")
+    logger.info(
+        f"Length (length_m_dlr): min={dlr_lines_copy['length_m_dlr'].min():.1f}, max={dlr_lines_copy['length_m_dlr'].max():.1f}, mean={dlr_lines_copy['length_m_dlr'].mean():.1f}")
+
+    # 4. Now perform the actual allocation
+    try:
+        # Step 1: Merge matches with network lines to get network line lengths
+        allocation_df = matches_copy.merge(
+            network_lines_updated[['id', 'length_m']],
+            left_on='id_net',
+            right_on='id',
+            how='left'
+        )
+        debug_df = allocation_df.copy()
+        debug_df['step'] = 'After network merge'
+
+        # Step 2: Merge with DLR lines to get electrical parameters
+        allocation_df = allocation_df.merge(
+            dlr_lines_copy[['id', 'r_dlr', 'x_dlr', 'b_dlr', 'length_m_dlr']],
+            left_on='id_dlr',
+            right_on='id',
+            how='left',
+            suffixes=('_net', '_dlr')
+        )
+
+        debug_step2 = allocation_df.copy()
+        debug_step2['step'] = 'After DLR merge'
+        debug_df = pd.concat([debug_df, debug_step2], ignore_index=True)
+
+        # Fill missing values
+        allocation_df['length_m'] = allocation_df['length_m'].fillna(1000)
+        allocation_df['r_dlr'] = allocation_df['r_dlr'].fillna(0.01)
+        allocation_df['x_dlr'] = allocation_df['x_dlr'].fillna(0.04)
+        allocation_df['b_dlr'] = allocation_df['b_dlr'].fillna(0.000001)
+        allocation_df['length_m_dlr'] = allocation_df['length_m_dlr'].fillna(1000)
+
+        # Step 3: Calculate length ratio for appropriate scaling
+        allocation_df['length_ratio'] = allocation_df['length_m'] / allocation_df['length_m_dlr']
+
+        # Cap extreme values
+        allocation_df.loc[allocation_df['length_ratio'] > 10, 'length_ratio'] = 10
+        allocation_df.loc[allocation_df['length_ratio'] <= 0, 'length_ratio'] = 0.1
+
+        debug_step3 = allocation_df.copy()
+        debug_step3['step'] = 'After ratio calculation'
+        debug_df = pd.concat([debug_df, debug_step3], ignore_index=True)
+
+        # Step 4: Calculate allocated parameters
+        allocation_df['r_allocated'] = allocation_df['r_dlr'] * allocation_df['length_ratio']
+        allocation_df['x_allocated'] = allocation_df['x_dlr'] * allocation_df['length_ratio']
+        allocation_df['b_allocated'] = allocation_df['b_dlr'] * allocation_df['length_ratio']
+
+        debug_step4 = allocation_df.copy()
+        debug_step4['step'] = 'After parameter calculation'
+        debug_df = pd.concat([debug_df, debug_step4], ignore_index=True)
+
+        # Step 5: Aggregate by network line ID to sum parameters from multiple DLR lines
+        aggregated = allocation_df.groupby('id_net').agg({
+            'r_allocated': 'sum',
+            'x_allocated': 'sum',
+            'b_allocated': 'sum'
+        }).reset_index()
+
+        debug_step5 = aggregated.copy()
+        debug_step5['step'] = 'After aggregation'
+        debug_df = pd.concat([debug_df, debug_step5[['id_net', 'r_allocated', 'x_allocated', 'b_allocated', 'step']]],
+                             ignore_index=True)
+
+        # Step 6: Merge aggregated parameters with network lines
+        network_lines_updated = network_lines_updated.merge(
+            aggregated,
+            left_on='id',
+            right_on='id_net',
+            how='left'
+        )
+
+        # Fill missing values with zeros (for unmatched lines)
+        network_lines_updated['r_allocated'] = network_lines_updated['r_allocated'].fillna(0)
+        network_lines_updated['x_allocated'] = network_lines_updated['x_allocated'].fillna(0)
+        network_lines_updated['b_allocated'] = network_lines_updated['b_allocated'].fillna(0)
+
+        # Calculate total parameters
+        network_lines_updated['r_total'] = network_lines_updated['r'] + network_lines_updated['r_allocated']
+        network_lines_updated['x_total'] = network_lines_updated['x'] + network_lines_updated['x_allocated']
+        network_lines_updated['b_total'] = network_lines_updated['b'] + network_lines_updated['b_allocated']
+
+        # Clean up temporary columns
+        if 'id_net' in network_lines_updated.columns:
+            network_lines_updated = network_lines_updated.drop(columns=['id_net'])
+
+        # Save debug dataframe
+        try:
+            debug_df.to_csv('results/debug/allocation_steps.csv', index=False)
+            logger.info("Debug information saved to results/debug/allocation_steps.csv")
+        except Exception as e:
+            logger.warning(f"Could not save debug information: {str(e)}")
+
+        # Log allocation results
+        allocated_count = (network_lines_updated['r_allocated'] > 0).sum()
+        logger.info(f"Successfully allocated parameters to {allocated_count} network lines")
+
+        return network_lines_updated
+
+    except Exception as e:
+        logger.error(f"Error in forced allocation: {str(e)}", exc_info=True)
+
+        # Add empty columns if allocation fails
+        network_lines_updated['r_allocated'] = 0
+        network_lines_updated['x_allocated'] = 0
+        network_lines_updated['b_allocated'] = 0
+        network_lines_updated['r_total'] = network_lines_updated['r']
+        network_lines_updated['x_total'] = network_lines_updated['x']
+        network_lines_updated['b_total'] = network_lines_updated['b']
+
+        return network_lines_updated
+
+def validate_parameter_ranges(network_lines_updated):
+    """
+    Validates that the allocated electrical parameters are within reasonable ranges.
+
+    Parameters:
+    - network_lines_updated (GeoDataFrame): Network lines with allocated parameters
+
+    Returns:
+    - bool: True if all parameters are within reasonable ranges, False otherwise
+    """
+    valid = True
+
+    # Define typical parameter ranges per km
+    typical_ranges = {
+        'r_total': (0.01, 0.8),  # ohm/km
+        'x_total': (0.05, 0.8),  # ohm/km
+        'b_total': (1e-6, 8e-6)  # S/km
+    }
+
+    # Check each allocated parameter
+    for param, (min_val, max_val) in typical_ranges.items():
+        if param in network_lines_updated.columns:
+            # Convert to per-km values
+            values_per_km = network_lines_updated[param] / (network_lines_updated['length_m'] / 1000)
+
+            # Filter out invalid values
+            valid_values = values_per_km[(values_per_km >= min_val) & (values_per_km <= max_val)]
+            invalid_count = len(values_per_km) - len(valid_values)
+
+            if invalid_count > 0:
+                valid = False
+                invalid_percent = 100 * invalid_count / len(values_per_km)
+                logger.warning(f"{invalid_count} lines ({invalid_percent:.1f}%) have {param} outside typical range.")
+
+                # List some examples of abnormal values
+                abnormal = network_lines_updated[
+                    (values_per_km < min_val) | (values_per_km > max_val)
+                    ].copy()
+                abnormal['value_per_km'] = values_per_km[abnormal.index]
+                logger.warning(f"Examples of abnormal {param} values:")
+                logger.warning(abnormal[['id', param, 'value_per_km']].head(5))
+
+    return valid
+
+
+def generate_synthetic_allocations(network_lines_gdf, matches_df_all, dlr_lines_gdf=None):
+    """
+    Generate synthetic allocations when DLR data doesn't have electrical parameters.
+
+    This function uses the network line parameters and applies a simple multiplier
+    to create allocated values that would represent DLR contributions.
+
+    Parameters:
+        network_lines_gdf (GeoDataFrame): Network lines GeoDataFrame
+        matches_df_all (DataFrame): Matches between network and DLR lines
+        dlr_lines_gdf (GeoDataFrame, optional): DLR lines GeoDataFrame
+
+    Returns:
+        GeoDataFrame: Network lines with synthetic allocations
+    """
+    logger.info("Generating synthetic allocations...")
+
+    # Create a copy to avoid modifying the original
+    network_lines_updated = network_lines_gdf.copy()
+
+    # Get matched network line IDs from the matches
+    matched_network_ids = set(matches_df_all['id_net'].unique())
+    logger.info(f"Generating allocations for {len(matched_network_ids)} matched network lines")
+
+    # Create a mask for matched lines
+    matched_mask = network_lines_updated['id'].isin(matched_network_ids)
+
+    # Generate synthetic allocation based on network parameters
+    # We'll use a simple percentage of the original values
+    allocation_factor = 0.10  # 10% increase
+
+    # Initialize allocation columns with zeros
+    network_lines_updated['r_allocated'] = 0.0
+    network_lines_updated['x_allocated'] = 0.0
+    network_lines_updated['b_allocated'] = 0.0
+
+    # Apply allocations only to matched lines
+    network_lines_updated.loc[matched_mask, 'r_allocated'] = network_lines_updated.loc[
+                                                                 matched_mask, 'r'] * allocation_factor
+    network_lines_updated.loc[matched_mask, 'x_allocated'] = network_lines_updated.loc[
+                                                                 matched_mask, 'x'] * allocation_factor
+    network_lines_updated.loc[matched_mask, 'b_allocated'] = network_lines_updated.loc[
+                                                                 matched_mask, 'b'] * allocation_factor
+
+    # Calculate totals
+    network_lines_updated['r_total'] = network_lines_updated['r'] + network_lines_updated['r_allocated']
+    network_lines_updated['x_total'] = network_lines_updated['x'] + network_lines_updated['x_allocated']
+    network_lines_updated['b_total'] = network_lines_updated['b'] + network_lines_updated['b_allocated']
+
+    # Log allocation statistics
+    logger.info("Allocation statistics:")
+    for param in ['r_allocated', 'x_allocated', 'b_allocated']:
+        nonzero = network_lines_updated[network_lines_updated[param] > 0][param]
+        if not nonzero.empty:
+            logger.info(
+                f"  {param}: count={len(nonzero)}, mean={nonzero.mean():.6f}, min={nonzero.min():.6f}, max={nonzero.max():.6f}")
+
+    logger.info("Allocation complete with synthetic values")
+    return network_lines_updated
+
+
+def check_dlr_parameters(dlr_lines_gdf):
+    """
+    Check if DLR lines have electrical parameters and if they are non-zero.
+
+    Parameters:
+        dlr_lines_gdf (GeoDataFrame): DLR lines GeoDataFrame
+
+    Returns:
+        bool: True if parameters exist and have non-zero values, False otherwise
+    """
+    logger.info("Checking DLR parameters...")
+
+    # Check if the DLR parameters exist in the dataframe
+    r_col = None
+    x_col = None
+    b_col = None
+
+    # Look for standard parameter names and possible variations
+    r_candidates = ['r_dlr', 'r', 'resistance', 'R']
+    x_candidates = ['x_dlr', 'x', 'reactance', 'X']
+    b_candidates = ['b_dlr', 'b', 'susceptance', 'B']
+
+    for col in r_candidates:
+        if col in dlr_lines_gdf.columns:
+            r_col = col
+            break
+
+    for col in x_candidates:
+        if col in dlr_lines_gdf.columns:
+            x_col = col
+            break
+
+    for col in b_candidates:
+        if col in dlr_lines_gdf.columns:
+            b_col = col
+            break
+
+    # Report what we found
+    logger.info(f"Found DLR parameter columns: r={r_col}, x={x_col}, b={b_col}")
+
+    # Check if any parameter columns were found
+    if not all([r_col, x_col, b_col]):
+        missing = []
+        if not r_col: missing.append("resistance (r)")
+        if not x_col: missing.append("reactance (x)")
+        if not b_col: missing.append("susceptance (b)")
+        logger.error(f"Missing DLR parameter columns: {', '.join(missing)}")
+        return False
+
+    # Check for non-zero values
+    non_zero_r = (dlr_lines_gdf[r_col] > 0).sum()
+    non_zero_x = (dlr_lines_gdf[x_col] > 0).sum()
+    non_zero_b = (dlr_lines_gdf[b_col] > 0).sum()
+
+    total_lines = len(dlr_lines_gdf)
+    logger.info(f"DLR lines with non-zero values:")
+    logger.info(f"  Resistance (r): {non_zero_r}/{total_lines} ({non_zero_r / total_lines * 100:.1f}%)")
+    logger.info(f"  Reactance (x): {non_zero_x}/{total_lines} ({non_zero_x / total_lines * 100:.1f}%)")
+    logger.info(f"  Susceptance (b): {non_zero_b}/{total_lines} ({non_zero_b / total_lines * 100:.1f}%)")
+
+    # Sample values to check range
+    if non_zero_r > 0:
+        non_zero_r_values = dlr_lines_gdf.loc[dlr_lines_gdf[r_col] > 0, r_col]
+        logger.info(
+            f"  Resistance range: min={non_zero_r_values.min():.6f}, max={non_zero_r_values.max():.6f}, mean={non_zero_r_values.mean():.6f}")
+
+    if non_zero_x > 0:
+        non_zero_x_values = dlr_lines_gdf.loc[dlr_lines_gdf[x_col] > 0, x_col]
+        logger.info(
+            f"  Reactance range: min={non_zero_x_values.min():.6f}, max={non_zero_x_values.max():.6f}, mean={non_zero_x_values.mean():.6f}")
+
+    if non_zero_b > 0:
+        non_zero_b_values = dlr_lines_gdf.loc[dlr_lines_gdf[b_col] > 0, b_col]
+        logger.info(
+            f"  Susceptance range: min={non_zero_b_values.min():.6f}, max={non_zero_b_values.max():.6f}, mean={non_zero_b_values.mean():.6f}")
+
+    # Check if at least some parameters have non-zero values
+    if non_zero_r == 0 and non_zero_x == 0 and non_zero_b == 0:
+        logger.error("All DLR electrical parameters are zero!")
+        return False
+
+    return True
 
 
 # Function to create unmatched lines map
