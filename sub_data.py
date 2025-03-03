@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 # update_network_transformers_aggregated.py
 
-import pandas as pd
+import logging
 import os
 import sys
-import logging
+
 import numpy as np
+import pandas as pd
 
 
 def configure_logging():
@@ -14,10 +15,8 @@ def configure_logging():
     """
     logging.basicConfig(
         level=logging.INFO,
-        format='%(asctime)s %(levelname)s:%(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout)
-        ]
+        format="%(asctime)s %(levelname)s:%(message)s",
+        handlers=[logging.StreamHandler(sys.stdout)],
     )
 
 
@@ -80,7 +79,9 @@ def identify_and_save_duplicates(new_df, key_columns, duplicates_file_path):
     # Identify all transformers with the same (bus0, bus1)
     duplicates = new_df[new_df.duplicated(subset=key_columns, keep=False)]
     if not duplicates.empty:
-        logging.warning("Found duplicate entries in 'new_network_transformers.csv'. Saving duplicates for review.")
+        logging.warning(
+            "Found duplicate entries in 'new_network_transformers.csv'. Saving duplicates for review."
+        )
         duplicates.to_csv(duplicates_file_path, index=False)
         logging.info(f"Duplicate entries saved to '{duplicates_file_path}'.")
     else:
@@ -109,16 +110,20 @@ def aggregate_transformers(new_df, key_columns, update_cols):
     for name, group in grouped:
         bus0, bus1 = name
         num_transformers = group.shape[0]
-        logging.info(f"Aggregating {num_transformers} transformers for substation ({bus0}, {bus1})")
+        logging.info(
+            f"Aggregating {num_transformers} transformers for substation ({bus0}, {bus1})"
+        )
 
         # Calculate equivalent impedance Z_eq = 1 / Σ(1 / Z_i)
         # Where Z_i = r_i + jx_i
-        Z_i = group.apply(lambda row: complex(row['r'], row['x']), axis=1)
+        Z_i = group.apply(lambda row: complex(row["r"], row["x"]), axis=1)
         Y_i = 1 / Z_i  # Admittance of each transformer
         Y_eq = Y_i.sum()  # Total admittance
 
         if Y_eq == 0:
-            logging.warning(f"Total admittance for substation ({bus0}, {bus1}) is zero. Setting Z_eq to infinity.")
+            logging.warning(
+                f"Total admittance for substation ({bus0}, {bus1}) is zero. Setting Z_eq to infinity."
+            )
             Z_eq = complex(np.inf, np.inf)
         else:
             Z_eq = 1 / Y_eq  # Equivalent impedance
@@ -127,30 +132,34 @@ def aggregate_transformers(new_df, key_columns, update_cols):
         X_eq = Z_eq.imag
 
         # Sum s_nom
-        s_nom_eq = group['s_nom'].sum()
+        s_nom_eq = group["s_nom"].sum()
 
         # Sum G and B
-        G_eq = group['g'].sum()
-        B_eq = group['b'].sum()
+        G_eq = group["g"].sum()
+        B_eq = group["b"].sum()
 
         # For other attributes, decide aggregation method
         # Example: take the first non-null value or some other logic
         # Here, we'll take the first value for simplicity
-        other_cols = [col for col in new_df.columns if col not in key_columns + update_cols]
+        other_cols = [
+            col for col in new_df.columns if col not in key_columns + update_cols
+        ]
         aggregated_other = {}
         for col in other_cols:
             # Take the first non-null value
-            aggregated_other[col] = group[col].dropna().iloc[0] if not group[col].dropna().empty else np.nan
+            aggregated_other[col] = (
+                group[col].dropna().iloc[0] if not group[col].dropna().empty else np.nan
+            )
 
         # Create a new aggregated transformer entry
         aggregated_entry = {
-            'bus0': bus0,
-            'bus1': bus1,
-            'r': R_eq,
-            'g': G_eq,
-            'b': B_eq,
-            'x': X_eq,
-            's_nom': s_nom_eq
+            "bus0": bus0,
+            "bus1": bus1,
+            "r": R_eq,
+            "g": G_eq,
+            "b": B_eq,
+            "x": X_eq,
+            "s_nom": s_nom_eq,
         }
         # Add other aggregated attributes
         for col, value in aggregated_other.items():
@@ -181,15 +190,17 @@ def update_attributes(network_df, aggregated_new_df, key_columns, update_cols):
     merged_df = pd.merge(
         network_df,
         aggregated_new_df[key_columns + update_cols],
-        how='left',
+        how="left",
         on=key_columns,
-        suffixes=('', '_agg')
+        suffixes=("", "_agg"),
     )
 
     logging.info(f"Merged DataFrame shape: {merged_df.shape}")
 
     # Identify rows where aggregated attributes are available
-    condition = merged_df['r_agg'].notna()  # Assuming 'r_agg' indicates presence of new data
+    condition = merged_df[
+        "r_agg"
+    ].notna()  # Assuming 'r_agg' indicates presence of new data
 
     # Log the number of matches
     matches = condition.sum()
@@ -199,7 +210,7 @@ def update_attributes(network_df, aggregated_new_df, key_columns, update_cols):
     for col in update_cols:
         merged_df[col] = merged_df.apply(
             lambda row: row[f"{col}_agg"] if pd.notna(row[f"{col}_agg"]) else row[col],
-            axis=1
+            axis=1,
         )
 
     # Drop the aggregated columns
@@ -218,13 +229,15 @@ def main():
     # Define file paths
     data_dir = "/home/mohsen/PycharmProjects/egon-jao-matching/data"
     network_transformers_file = os.path.join(data_dir, "network_transformers.csv")
-    new_network_transformers_file = os.path.join(data_dir, "new_network_transformers.csv")
+    new_network_transformers_file = os.path.join(
+        data_dir, "new_network_transformers.csv"
+    )
     output_file = os.path.join(data_dir, "updated_network_transformers.csv")
     duplicates_file = os.path.join(data_dir, "duplicate_new_network_transformers.csv")
 
     # Define key columns and columns to update
-    key_columns = ['bus0', 'bus1']
-    update_cols = ['r', 'g', 'b', 'x', 's_nom']
+    key_columns = ["bus0", "bus1"]
+    update_cols = ["r", "g", "b", "x", "s_nom"]
 
     # Load CSV files
     network_df = load_csv(network_transformers_file)
@@ -235,13 +248,17 @@ def main():
     new_network_df = standardize_keys(new_network_df, key_columns)
 
     # Identify and save duplicate transformers
-    new_network_df = identify_and_save_duplicates(new_network_df, key_columns, duplicates_file)
+    new_network_df = identify_and_save_duplicates(
+        new_network_df, key_columns, duplicates_file
+    )
 
     # Aggregate duplicate transformers
     aggregated_new_df = aggregate_transformers(new_network_df, key_columns, update_cols)
 
     # Update attributes in network_df with aggregated values
-    updated_df = update_attributes(network_df, aggregated_new_df, key_columns, update_cols)
+    updated_df = update_attributes(
+        network_df, aggregated_new_df, key_columns, update_cols
+    )
 
     # Save the updated DataFrame to a new CSV file
     updated_df.to_csv(output_file, index=False)

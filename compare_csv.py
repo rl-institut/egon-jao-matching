@@ -1,7 +1,8 @@
-import pandas as pd
-import numpy as np
-import matplotlib.pyplot as plt
 import os
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
 
 # Paths to your CSV files
 lines_original_path = "lightsource/lines_original.csv"
@@ -12,22 +13,17 @@ original_df = pd.read_csv(lines_original_path)
 updated_df = pd.read_csv(lines_updated_path)
 
 # Convert 'id' to string in both DataFrames before merging
-original_df['id'] = original_df['id'].astype(str)
-updated_df['id'] = updated_df['id'].astype(str)
+original_df["id"] = original_df["id"].astype(str)
+updated_df["id"] = updated_df["id"].astype(str)
 
 # Print debug info
-print("Original DataFrame 'id' type:", original_df['id'].dtype)
-print("Updated DataFrame 'id' type:", updated_df['id'].dtype)
-print("Sample of original ids:", original_df['id'].head())
-print("Sample of updated ids:", updated_df['id'].head())
+print("Original DataFrame 'id' type:", original_df["id"].dtype)
+print("Updated DataFrame 'id' type:", updated_df["id"].dtype)
+print("Sample of original ids:", original_df["id"].head())
+print("Sample of updated ids:", updated_df["id"].head())
 
 # Merge on the now-string 'id' column
-df_merged = pd.merge(
-    original_df,
-    updated_df,
-    on="id",
-    suffixes=("_orig", "_upd")
-)
+df_merged = pd.merge(original_df, updated_df, on="id", suffixes=("_orig", "_upd"))
 print("DEBUG: Merged shape =", df_merged.shape)
 
 # Columns we want to compare
@@ -36,7 +32,7 @@ output_dir = "lightsource/analysis_results_clamped_ratio"
 os.makedirs(output_dir, exist_ok=True)
 
 # Create a comprehensive comparison DataFrame
-comparison_df = pd.DataFrame({'id': df_merged['id']})
+comparison_df = pd.DataFrame({"id": df_merged["id"]})
 
 for col in columns_to_compare:
     col_orig = f"{col}_orig"
@@ -52,13 +48,19 @@ for col in columns_to_compare:
     df_merged[col_upd] = pd.to_numeric(df_merged[col_upd], errors="coerce")
 
     # Add to comparison DataFrame
-    comparison_df[f'{col}_original'] = df_merged[col_orig]
-    comparison_df[f'{col}_updated'] = df_merged[col_upd]
+    comparison_df[f"{col}_original"] = df_merged[col_orig]
+    comparison_df[f"{col}_updated"] = df_merged[col_upd]
 
     # Add ratio where applicable
-    mask = (~df_merged[col_orig].isna()) & (~df_merged[col_upd].isna()) & (df_merged[col_orig] > 0)
-    comparison_df[f'{col}_ratio'] = np.nan
-    comparison_df.loc[mask, f'{col}_ratio'] = df_merged.loc[mask, col_upd] / df_merged.loc[mask, col_orig]
+    mask = (
+        (~df_merged[col_orig].isna())
+        & (~df_merged[col_upd].isna())
+        & (df_merged[col_orig] > 0)
+    )
+    comparison_df[f"{col}_ratio"] = np.nan
+    comparison_df.loc[mask, f"{col}_ratio"] = (
+        df_merged.loc[mask, col_upd] / df_merged.loc[mask, col_orig]
+    )
 
     # Filter rows: original must be > 0 to avoid division by zero
     df_compare = df_merged.loc[mask].copy()
@@ -78,7 +80,9 @@ for col in columns_to_compare:
         # Save these rows to a CSV
         big_ratio_csv = os.path.join(output_dir, f"{col}_ratio_gte10.csv")
         df_compare.loc[big_mask].to_csv(big_ratio_csv, index=False)
-        print(f"Saved {big_mask.sum()} rows with ratio >= 10 for '{col}' to {big_ratio_csv}")
+        print(
+            f"Saved {big_mask.sum()} rows with ratio >= 10 for '{col}' to {big_ratio_csv}"
+        )
 
     # ------------------------------------------------------------
     # 2) CLAMP ratio to [0, 10] for plotting
@@ -95,7 +99,7 @@ for col in columns_to_compare:
         cmap="viridis",
         alpha=0.7,
         vmin=0,
-        vmax=10
+        vmax=10,
     )
     plt.colorbar(scatter, label="Updated / Original ratio (0..10)")
 
@@ -125,16 +129,17 @@ print(f"Comprehensive parameter comparison saved to {comparison_csv_path}")
 if not comparison_df.empty:
     # Find lines with non-zero values in the updated columns
     non_zero_mask = (
-            (comparison_df['r_updated'] > 0) |
-            (comparison_df['x_updated'] > 0) |
-            (comparison_df['b_updated'] > 0)
+        (comparison_df["r_updated"] > 0)
+        | (comparison_df["x_updated"] > 0)
+        | (comparison_df["b_updated"] > 0)
     )
 
     # Get 50 samples with significant changes
-    interesting_samples = comparison_df[non_zero_mask].sort_values(
-        by=['r_ratio', 'x_ratio', 'b_ratio'],
-        ascending=False
-    ).head(50)
+    interesting_samples = (
+        comparison_df[non_zero_mask]
+        .sort_values(by=["r_ratio", "x_ratio", "b_ratio"], ascending=False)
+        .head(50)
+    )
 
     sample_path = os.path.join(output_dir, "interesting_changes_sample.csv")
     interesting_samples.to_csv(sample_path, index=False)

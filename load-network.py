@@ -1,14 +1,16 @@
+import dill
 import pypsa
 import pypsa.descriptors
-import dill
 
 # Ensure 'Dict' exists in pypsa.descriptors
-if not hasattr(pypsa.descriptors, 'Dict'):
+if not hasattr(pypsa.descriptors, "Dict"):
     pypsa.descriptors.Dict = dict
     print("Added 'Dict' attribute to pypsa.descriptors.")
 
 # Path to the Pickle file
-pickle_path = "network/network_post_selection_status2023_8760_3_post_reactance_fix_updated.pkl"
+pickle_path = (
+    "network/network_post_selection_status2023_8760_3_post_reactance_fix_updated.pkl"
+)
 
 try:
     with open(pickle_path, "rb") as f:
